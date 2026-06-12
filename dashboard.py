@@ -57,6 +57,7 @@ latest_lock = threading.Lock()
 
 
 def user_path(user, *parts):
+    """Path inside a given user's openclaw directory, e.g. /home/hermes/.openclaw/..."""
     return os.path.join('/home', user, '.openclaw', *parts)
 
 
@@ -76,6 +77,10 @@ def init_db():
 
 
 def fetch_history(limit=DISPLAY_POINTS):
+    """Most recent metric samples as parallel lists ready for the charts.
+
+    Timestamps are stored in UTC by SQLite and converted to LOCAL_TZ here.
+    """
     conn = sqlite3.connect(DB_PATH)
     rows = conn.execute(
         'SELECT timestamp, cpu, ram, rx, tx, ping, jitter, loss '
@@ -98,6 +103,11 @@ def fetch_history(limit=DISPLAY_POINTS):
 # --------------------------------------------------------- metric collector
 
 def get_sys_info():
+    """One snapshot of system stats, read from /proc and standard CLI tools.
+
+    Blocking (the ping alone takes ~4s), so this only runs in the collector
+    thread — pages render from the shared `latest` dict instead.
+    """
     info = {}
 
     # CPU raw ticks (percentage is computed from deltas between samples)
@@ -317,6 +327,10 @@ def find_api_key(provider):
 # ------------------------------------------------------------ API test
 
 def test_api(provider, model):
+    """Send a minimal one-shot prompt to the provider and measure latency.
+
+    Blocking (urllib); call via run.io_bound from the UI.
+    """
     start = time.time()
     try:
         key = find_api_key(provider)
@@ -385,6 +399,7 @@ def test_api(provider, model):
 # ------------------------------------------------------------ speed test
 
 def do_speedtest():
+    """Run the Ookla CLI (~20s, blocking — call via run.io_bound) and record the result."""
     global last_speedtest_time, cached_speedtest_result
     result = subprocess.run(
         [SPEEDTEST_BIN, '--accept-license', '--accept-gdpr', '-f', 'json'],
@@ -415,6 +430,7 @@ def do_speedtest():
 # ------------------------------------------------------------------ UI
 
 AXIS_STYLE = {'axisLabel': {'color': '#888'}, 'splitLine': {'lineStyle': {'color': '#444'}}}
+# JS formatter (runs in the browser) for the throughput chart's y-axis labels.
 BYTES_FORMATTER = ('v => v >= 1048576 ? (v / 1048576).toFixed(1) + " MB/s" '
                    ': v >= 1024 ? (v / 1024).toFixed(1) + " KB/s" : v + " B/s"')
 
@@ -442,6 +458,7 @@ def make_chart(series, y_axis_extra=None):
 
 
 def set_chart_data(chart, labels, *series_data):
+    """Replace a chart's x-axis labels and series data (one list per series)."""
     chart.options['xAxis']['data'] = labels
     for i, data in enumerate(series_data):
         chart.options['series'][i]['data'] = data
@@ -449,6 +466,7 @@ def set_chart_data(chart, labels, *series_data):
 
 
 def section_card(title):
+    """Dark card with an orange title — the basic building block of the page."""
     card = ui.card().classes('w-full bg-[#2d2d2d] border border-[#444]')
     with card:
         ui.label(title).classes('text-lg font-bold text-[#ff9900]')
@@ -457,6 +475,7 @@ def section_card(title):
 
 @ui.page('/login')
 def login_page():
+    """Password prompt; on success marks the browser session as authenticated."""
     if app.storage.user.get('authenticated', False):
         return RedirectResponse('/')
 
@@ -480,6 +499,8 @@ def login_page():
 
 @ui.page('/')
 def main_page():
+    """The dashboard itself. Built per connected client; two timers keep it
+    live — system stats/charts every 15s, openclaw data every 60s."""
     if not app.storage.user.get('authenticated', False):
         return RedirectResponse('/login')
 
@@ -600,6 +621,7 @@ def main_page():
                 fixed_issues_box = ui.column().classes('w-full gap-1')
 
     def refresh_stats():
+        """Update text metrics from the collector's snapshot and redraw charts from the DB."""
         with latest_lock:
             data = dict(latest)
         if data:
@@ -618,6 +640,7 @@ def main_page():
         set_chart_data(net_chart, h['labels'], h['rx'], h['tx'])
 
     def issue_row(container, items):
+        """Render a list of issues into a column, each tagged with its owner."""
         container.clear()
         with container:
             if not items:
@@ -628,6 +651,7 @@ def main_page():
                     ui.label(item['text']).classes('text-sm text-white')
 
     def refresh_meta():
+        """Re-read cron jobs, memories, and issues from every user's workspace."""
         cron_table.rows = get_cron_jobs()
         cron_table.update()
 
@@ -666,6 +690,7 @@ def load_storage_secret():
         return secret
 
 
+# NiceGUI may re-import this module in a child process, hence the '__mp_main__' guard.
 if __name__ in {'__main__', '__mp_main__'}:
     init_db()
     app.on_startup(lambda: threading.Thread(target=collector, daemon=True).start())
