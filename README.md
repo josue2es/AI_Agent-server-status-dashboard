@@ -1,6 +1,6 @@
-# Openclaw Server Status Dashboard
+# AI Agents Dashboard
 
-A self-hosted server monitoring dashboard for servers running [openclaw](https://openclaw.ai). Built with Python and [NiceGUI](https://nicegui.io). Runs as a system (root) service and aggregates openclaw data — cron jobs, agent memories, and issues — from **multiple user accounts** on the same server.
+A self-hosted server monitoring dashboard for hosts running AI agents. Built with Python and [NiceGUI](https://nicegui.io). Runs as a system (root) service and aggregates agent data — cron jobs, memories, and issues — from **multiple user accounts** on the same server. Agent data is currently read from each user's [openclaw](https://openclaw.ai) workspace.
 
 ![Dashboard](https://img.shields.io/badge/python-3.10%2B-blue) ![License](https://img.shields.io/badge/license-MIT-green)
 
@@ -41,10 +41,10 @@ The user list is controlled by the `DASHBOARD_USERS` environment variable (comma
 Install into a virtualenv so the Python dependencies stay off your system Python:
 
 ```bash
-sudo mkdir -p /opt/openclaw-dashboard
-sudo cp dashboard.py requirements.txt /opt/openclaw-dashboard/
-sudo python3 -m venv /opt/openclaw-dashboard/venv
-sudo /opt/openclaw-dashboard/venv/bin/pip install -r /opt/openclaw-dashboard/requirements.txt
+sudo mkdir -p /opt/ai-agents-dashboard
+sudo cp dashboard.py requirements.txt /opt/ai-agents-dashboard/
+sudo python3 -m venv /opt/ai-agents-dashboard/venv
+sudo /opt/ai-agents-dashboard/venv/bin/pip install -r /opt/ai-agents-dashboard/requirements.txt
 ```
 
 ### 2. Set your password
@@ -58,13 +58,13 @@ echo -n 'your-password' | sha256sum
 ### 3. Create the systemd service (runs as root)
 
 ```bash
-sudo tee /etc/systemd/system/openclaw-dashboard.service << 'EOF'
+sudo tee /etc/systemd/system/ai-agents-dashboard.service << 'EOF'
 [Unit]
-Description=Openclaw Server Status Dashboard
+Description=AI Agents Dashboard
 After=network.target
 
 [Service]
-ExecStart=/opt/openclaw-dashboard/venv/bin/python /opt/openclaw-dashboard/dashboard.py
+ExecStart=/opt/ai-agents-dashboard/venv/bin/python /opt/ai-agents-dashboard/dashboard.py
 Environment=DASHBOARD_USERS=hermes,openclaw
 Environment=DASHBOARD_TZ=America/El_Salvador
 # Environment=DASHBOARD_PASSWORD_HASH=<your sha256 hash>
@@ -80,7 +80,7 @@ EOF
 
 ```bash
 sudo systemctl daemon-reload
-sudo systemctl enable --now openclaw-dashboard
+sudo systemctl enable --now ai-agents-dashboard
 ```
 
 The dashboard will be available at `http://localhost:8080`.
@@ -90,9 +90,9 @@ The service runs as root because it reads each user's `/home/<user>/.openclaw` d
 ### Updating
 
 ```bash
-sudo cp dashboard.py /opt/openclaw-dashboard/
-sudo /opt/openclaw-dashboard/venv/bin/pip install -r /opt/openclaw-dashboard/requirements.txt  # if deps changed
-sudo systemctl restart openclaw-dashboard
+sudo cp dashboard.py /opt/ai-agents-dashboard/
+sudo /opt/ai-agents-dashboard/venv/bin/pip install -r /opt/ai-agents-dashboard/requirements.txt  # if deps changed
+sudo systemctl restart ai-agents-dashboard
 ```
 
 ## Configuration
@@ -103,7 +103,7 @@ All configuration is via environment variables:
 |---|---|---|
 | `DASHBOARD_USERS` | `hermes,openclaw` | Comma-separated users whose openclaw data is aggregated |
 | `DASHBOARD_PORT` | `8080` | Port to listen on |
-| `DASHBOARD_DATA_DIR` | `/var/lib/openclaw-dashboard` | Directory for the SQLite database and session secret |
+| `DASHBOARD_DATA_DIR` | `/var/lib/ai-agents-dashboard` | Directory for the SQLite database and session secret |
 | `DASHBOARD_PASSWORD_HASH` | See script | SHA-256 hash of the login password |
 | `DASHBOARD_SECRET` | Auto-generated, persisted | Secret for session cookies |
 | `DASHBOARD_TZ` | `America/El_Salvador` | Timezone for chart labels and cron times |

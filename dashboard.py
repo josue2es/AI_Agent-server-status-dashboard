@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Openclaw server status dashboard.
+"""AI agents status dashboard.
 
-NiceGUI rewrite. Runs as root and aggregates openclaw data (cron jobs,
-agent memories, issues, auth profiles) from multiple user accounts.
+NiceGUI rewrite. Runs as root and aggregates agent data (cron jobs,
+memories, issues, auth profiles) from multiple user accounts. Data is
+currently read from each user's openclaw workspace.
 """
 
 import hashlib
@@ -23,11 +24,11 @@ from zoneinfo import ZoneInfo
 from fastapi.responses import RedirectResponse
 from nicegui import app, run, ui
 
-# Users whose openclaw workspaces are aggregated (cron jobs, memories, issues).
-OPENCLAW_USERS = os.environ.get('DASHBOARD_USERS', 'hermes,openclaw').split(',')
+# Users whose agent workspaces are aggregated (cron jobs, memories, issues).
+AGENT_USERS = os.environ.get('DASHBOARD_USERS', 'hermes,openclaw').split(',')
 
 PORT = int(os.environ.get('DASHBOARD_PORT', '8080'))
-DATA_DIR = os.environ.get('DASHBOARD_DATA_DIR', '/var/lib/openclaw-dashboard')
+DATA_DIR = os.environ.get('DASHBOARD_DATA_DIR', '/var/lib/ai-agents-dashboard')
 DB_PATH = os.path.join(DATA_DIR, 'dashboard.db')
 SPEEDTEST_BIN = os.environ.get('SPEEDTEST_BIN', 'speedtest-ookla')
 # Filesystem to report disk usage for. In a container, set this to a bind mount
@@ -249,12 +250,12 @@ def collector():
         time.sleep(COLLECT_INTERVAL)
 
 
-# ------------------------------------------------- multi-user openclaw data
+# -------------------------------------------------- multi-user agent data
 
 def get_cron_jobs():
-    """Enabled cron jobs across all configured openclaw users."""
+    """Enabled cron jobs across all configured agent users."""
     jobs = []
-    for user in OPENCLAW_USERS:
+    for user in AGENT_USERS:
         path = user_path(user, 'cron', 'jobs.json')
         try:
             with open(path) as f:
@@ -278,10 +279,10 @@ def get_cron_jobs():
 
 
 def get_memories():
-    """Last 5 memory entries of today per openclaw user."""
+    """Last 5 memory entries of today per agent user."""
     memories = {}
     today = datetime.now(LOCAL_TZ).strftime('%Y-%m-%d')
-    for user in OPENCLAW_USERS:
+    for user in AGENT_USERS:
         path = user_path(user, 'workspace', 'memory', f'{today}.md')
         try:
             with open(path) as f:
@@ -293,9 +294,9 @@ def get_memories():
 
 
 def get_issues():
-    """Active and resolved issues across all openclaw users, tagged by user."""
+    """Active and resolved issues across all agent users, tagged by user."""
     issues = {'active': [], 'fixed': []}
-    for user in OPENCLAW_USERS:
+    for user in AGENT_USERS:
         path = user_path(user, 'workspace', 'ISSUES.md')
         try:
             with open(path) as f:
@@ -314,7 +315,7 @@ def get_issues():
 
 def find_api_key(provider):
     """Search every user's auth profiles for a key for the given provider."""
-    for user in OPENCLAW_USERS:
+    for user in AGENT_USERS:
         path = user_path(user, 'agents', 'main', 'agent', 'auth-profiles.json')
         try:
             with open(path) as f:
@@ -503,7 +504,7 @@ def login_page():
 @ui.page('/')
 def main_page():
     """The dashboard itself. Built per connected client; two timers keep it
-    live — system stats/charts every 15s, openclaw data every 60s."""
+    live — system stats/charts every 15s, agent data every 60s."""
     if not app.storage.user.get('authenticated', False):
         return RedirectResponse('/login')
 
