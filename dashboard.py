@@ -30,6 +30,9 @@ PORT = int(os.environ.get('DASHBOARD_PORT', '8080'))
 DATA_DIR = os.environ.get('DASHBOARD_DATA_DIR', '/var/lib/openclaw-dashboard')
 DB_PATH = os.path.join(DATA_DIR, 'dashboard.db')
 SPEEDTEST_BIN = os.environ.get('SPEEDTEST_BIN', 'speedtest-ookla')
+# Filesystem to report disk usage for. In a container, set this to a bind mount
+# of the host root (e.g. /host) so the panel shows the server's disk, not the overlay.
+DISK_PATH = os.environ.get('DASHBOARD_DISK_PATH', '/')
 LOCAL_TZ = ZoneInfo(os.environ.get('DASHBOARD_TZ', 'America/El_Salvador'))
 
 # Password hash (sha256 of the actual password)
@@ -141,7 +144,7 @@ def get_sys_info():
 
     # Disk
     try:
-        total, used, _free = shutil.disk_usage('/')
+        total, used, _free = shutil.disk_usage(DISK_PATH)
         info['disk'] = f"{used/(1024**3):.2f} GB / {total/(1024**3):.2f} GB ({(used/total)*100:.1f}%)"
     except Exception:
         info['disk'] = 'Error fetching disk space'
