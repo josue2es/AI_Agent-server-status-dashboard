@@ -38,10 +38,13 @@ The user list is controlled by the `DASHBOARD_USERS` environment variable (comma
 
 ### 1. Copy the script and install dependencies
 
+Install into a virtualenv so the Python dependencies stay off your system Python:
+
 ```bash
 sudo mkdir -p /opt/openclaw-dashboard
 sudo cp dashboard.py requirements.txt /opt/openclaw-dashboard/
-sudo pip install -r /opt/openclaw-dashboard/requirements.txt
+sudo python3 -m venv /opt/openclaw-dashboard/venv
+sudo /opt/openclaw-dashboard/venv/bin/pip install -r /opt/openclaw-dashboard/requirements.txt
 ```
 
 ### 2. Set your password
@@ -61,8 +64,9 @@ Description=Openclaw Server Status Dashboard
 After=network.target
 
 [Service]
-ExecStart=/usr/bin/python3 /opt/openclaw-dashboard/dashboard.py
+ExecStart=/opt/openclaw-dashboard/venv/bin/python /opt/openclaw-dashboard/dashboard.py
 Environment=DASHBOARD_USERS=hermes,openclaw
+Environment=DASHBOARD_TZ=America/El_Salvador
 # Environment=DASHBOARD_PASSWORD_HASH=<your sha256 hash>
 Restart=on-failure
 RestartSec=5
@@ -80,6 +84,16 @@ sudo systemctl enable --now openclaw-dashboard
 ```
 
 The dashboard will be available at `http://localhost:8080`.
+
+The service runs as root because it reads each user's `/home/<user>/.openclaw` directory and host-level facilities (`/proc`, `ps`, `ping`, login history). It is a single process with no inbound dependencies beyond the login page.
+
+### Updating
+
+```bash
+sudo cp dashboard.py /opt/openclaw-dashboard/
+sudo /opt/openclaw-dashboard/venv/bin/pip install -r /opt/openclaw-dashboard/requirements.txt  # if deps changed
+sudo systemctl restart openclaw-dashboard
+```
 
 ## Configuration
 

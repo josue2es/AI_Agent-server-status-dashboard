@@ -1,8 +1,0 @@
-.git
-.gitignore
-*.md
-__pycache__
-*.pyc
-.venv
-venv
-dashboard.db
