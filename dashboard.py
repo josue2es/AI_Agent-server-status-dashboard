@@ -31,6 +31,12 @@ PORT = int(os.environ.get('DASHBOARD_PORT', '8080'))
 DATA_DIR = os.environ.get('DASHBOARD_DATA_DIR', '/var/lib/ai-agents-dashboard')
 DB_PATH = os.path.join(DATA_DIR, 'dashboard.db')
 SPEEDTEST_BIN = os.environ.get('SPEEDTEST_BIN', 'speedtest-ookla')
+# Candidate filenames (in order) for an agent's model/profile config, tried both
+# directly under the agent dir and under its 'agent/' subdir. Override with
+# DASHBOARD_MODEL_CONFIG (comma-separated).
+MODEL_CONFIG_FILES = os.environ.get(
+    'DASHBOARD_MODEL_CONFIG',
+    'models.json,profiles.json,model-profiles.json,config.json').split(',')
 # Filesystem to report disk usage for. In a container, set this to a bind mount
 # of the host root (e.g. /host) so the panel shows the server's disk, not the overlay.
 DISK_PATH = os.environ.get('DASHBOARD_DISK_PATH', '/')
@@ -328,6 +334,110 @@ def find_api_key(provider):
     return None
 
 
+# --------------------------------------------------- model / profile config
+
+def _fmt_model(entry):
+    """Format a model reference as 'provider / model', from a dict or string."""
+    if isinstance(entry, str):
+        s = entry.strip()
+        if '/' in s:
+            provider, _, model = s.partition('/')
+            return f'{provider.strip()} / {model.strip()}'
+        return s
+    if isinstance(entry, dict):
+        provider = str(entry.get('provider') or entry.get('vendor') or '').strip()
+        model = str(entry.get('model') or entry.get('name') or entry.get('id') or '').strip()
+        if provider and model:
+            return f'{provider} / {model}'
+        # Provider field absent: the model may itself be a "provider/model" string.
+        return _fmt_model(model) if model else (provider or '?')
+    return '?'
+
+
+def _parse_profile(name, cfg):
+    """Normalize one profile into display fields: primary, reasoning, fallbacks[]."""
+    if not isinstance(cfg, dict):
+        return {'name': name, 'primary': _fmt_model(cfg), 'reasoning': '–', 'fallbacks': []}
+
+    # Primary model: an explicit 'primary', or provider+model set on the profile itself.
+    if isinstance(cfg.get('primary'), (dict, str)):
+        primary = cfg['primary']
+    elif 'provider' in cfg or 'model' in cfg:
+        primary = {'provider': cfg.get('provider'), 'model': cfg.get('model')}
+    else:
+        primary = cfg.get('model', '')
+
+    reasoning = (cfg.get('reasoning') or cfg.get('reasoningEffort')
+                 or cfg.get('reasoning_effort') or cfg.get('effort'))
+    reasoning = str(reasoning) if reasoning else '–'
+
+    raw = cfg.get('fallbacks') or cfg.get('fallback') or []
+    if isinstance(raw, (dict, str)):
+        raw = [raw]
+    fallbacks = [_fmt_model(fb) for fb in raw]
+
+    return {'name': name, 'primary': _fmt_model(primary),
+            'reasoning': reasoning, 'fallbacks': fallbacks}
+
+
+def _looks_like_profile(v):
+    return isinstance(v, dict) and any(
+        k in v for k in ('primary', 'model', 'provider', 'fallbacks', 'fallback'))
+
+
+def _load_profiles(cfg):
+    """Pull a {name: profile} mapping out of a loaded config file, tolerantly."""
+    if not isinstance(cfg, dict):
+        return []
+    profiles = cfg.get('profiles')
+    if not isinstance(profiles, dict):
+        # No 'profiles' key: only treat the top level as the map if its values
+        # actually look like profiles (avoids misreading an unrelated config.json).
+        if cfg and all(_looks_like_profile(v) for v in cfg.values()):
+            profiles = cfg
+        else:
+            return []
+    return [_parse_profile(name, pcfg) for name, pcfg in profiles.items()]
+
+
+def get_model_config():
+    """Model assignments for every agent of every user.
+
+    Returns [{'user', 'agent', 'profiles': [...]}], one entry per agent that has
+    a readable config. Each agent's config is the first match from
+    MODEL_CONFIG_FILES, looked up under the agent dir and its 'agent/' subdir
+    (mirroring where auth-profiles.json lives).
+    """
+    result = []
+    for user in AGENT_USERS:
+        agents_dir = user_path(user, 'agents')
+        try:
+            agents = sorted(a for a in os.listdir(agents_dir)
+                            if os.path.isdir(os.path.join(agents_dir, a)))
+        except Exception:
+            continue
+        for agent in agents:
+            cfg = None
+            for sub in ('', 'agent'):
+                base = os.path.join(agents_dir, agent, sub)
+                for fname in MODEL_CONFIG_FILES:
+                    try:
+                        with open(os.path.join(base, fname)) as f:
+                            cfg = json.load(f)
+                        break
+                    except FileNotFoundError:
+                        continue
+                    except Exception:
+                        cfg = None
+                        break
+                if cfg is not None:
+                    break
+            profiles = _load_profiles(cfg) if cfg is not None else []
+            if profiles:
+                result.append({'user': user, 'agent': agent, 'profiles': profiles})
+    return result
+
+
 # ------------------------------------------------------------ API test
 
 def test_api(provider, model):
@@ -615,6 +725,9 @@ def main_page():
                 rows=[],
             ).classes('w-full bg-transparent text-white').props('dark flat dense')
 
+        with section_card('Model Configuration — All Profiles'):
+            model_config_box = ui.column().classes('w-full gap-4')
+
         with section_card('Recent Memories (Last 5 per user)'):
             memories_box = ui.column().classes('w-full gap-2')
 
@@ -654,10 +767,46 @@ def main_page():
                     ui.label(f"[{item['user']}]").classes('text-xs text-[#ff9900]')
                     ui.label(item['text']).classes('text-sm text-white')
 
+    def render_model_config():
+        """One table of profile → model assignments per agent, grouped by user."""
+        model_config_box.clear()
+        agents = get_model_config()
+        with model_config_box:
+            if not agents:
+                ui.label('No model configuration found.').classes('text-sm text-gray-500')
+            for entry in agents:
+                ui.label(f"{entry['user']} / {entry['agent']}").classes(
+                    'text-sm font-bold text-[#ff9900]')
+                rows = []
+                for p in entry['profiles']:
+                    fb = p['fallbacks']
+                    rows.append({
+                        'profile': p['name'],
+                        'primary': p['primary'],
+                        'reasoning': p['reasoning'],
+                        'fb1': fb[0] if len(fb) > 0 else '–',
+                        'fb2': fb[1] if len(fb) > 1 else '–',
+                        # Everything past the first two collapses into "Final Fallback".
+                        'final': ', '.join(fb[2:]) if len(fb) > 2 else '(none)',
+                    })
+                ui.table(
+                    columns=[
+                        {'name': 'profile', 'label': 'Profile', 'field': 'profile', 'align': 'left'},
+                        {'name': 'primary', 'label': 'Primary Provider/Model', 'field': 'primary', 'align': 'left'},
+                        {'name': 'reasoning', 'label': 'Reasoning', 'field': 'reasoning', 'align': 'left'},
+                        {'name': 'fb1', 'label': 'Fallback 1', 'field': 'fb1', 'align': 'left'},
+                        {'name': 'fb2', 'label': 'Fallback 2', 'field': 'fb2', 'align': 'left'},
+                        {'name': 'final', 'label': 'Final Fallback', 'field': 'final', 'align': 'left'},
+                    ],
+                    rows=rows,
+                ).classes('w-full bg-transparent text-white').props('dark flat dense')
+
     def refresh_meta():
-        """Re-read cron jobs, memories, and issues from every user's workspace."""
+        """Re-read cron jobs, model config, memories, and issues from every user's workspace."""
         cron_table.rows = get_cron_jobs()
         cron_table.update()
+
+        render_model_config()
 
         memories_box.clear()
         with memories_box:

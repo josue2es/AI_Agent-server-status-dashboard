@@ -9,6 +9,7 @@ A self-hosted server monitoring dashboard for hosts running AI agents. Built wit
 - **Live system stats** — CPU, RAM, disk, network throughput, ping/jitter/packet loss
 - **Historical charts** — 3-hour rolling window, 24-hour retention in SQLite (ECharts)
 - **Multi-user openclaw integration** — displays active cron jobs, agent memories, and issues from every configured user (default: `hermes` and `openclaw`), each entry tagged with its owner
+- **Model configuration** — a per-agent table of each profile's primary provider/model, reasoning level, and fallback chain, across every agent of every user
 - **API health test** — test Anthropic, Google, and Moonshot/Kimi keys directly from the dashboard with latency measurement (keys are discovered across all configured users' auth profiles)
 - **Internet speed test** — powered by Ookla speedtest CLI, rate-limited to once per hour
 - **Password login** — session-based auth, sessions survive restarts
@@ -31,8 +32,32 @@ The dashboard runs as root and reads each configured user's openclaw workspace:
 | Agent memories | `/home/<user>/.openclaw/workspace/memory/<today>.md` |
 | Issues | `/home/<user>/.openclaw/workspace/ISSUES.md` |
 | API auth profiles | `/home/<user>/.openclaw/agents/main/agent/auth-profiles.json` |
+| Model config | `/home/<user>/.openclaw/agents/<agent>/[agent/]{models,profiles,model-profiles,config}.json` |
 
 The user list is controlled by the `DASHBOARD_USERS` environment variable (comma-separated, default `hermes,openclaw`). Missing files for a user are skipped silently.
+
+### Model configuration format
+
+Each agent under `/home/<user>/.openclaw/agents/` is scanned for a model-config file (the candidate filenames are configurable via `DASHBOARD_MODEL_CONFIG`, tried in order, both directly in the agent directory and in its `agent/` subdirectory). The expected shape is a `profiles` map where each profile carries its own primary model, reasoning level, and ordered fallback chain:
+
+```json
+{
+  "profiles": {
+    "default": {
+      "provider": "zai",
+      "model": "glm-5.2",
+      "reasoning": "max",
+      "fallbacks": [
+        { "provider": "deepseek", "model": "deepseek-v4-pro" },
+        { "provider": "kimi-coding", "model": "kimi-k2.6" },
+        { "provider": "gemini", "model": "gemini-3-pro-preview" }
+      ]
+    }
+  }
+}
+```
+
+The parser is tolerant of common variations: the primary can be a nested `primary` object or `provider`/`model` fields on the profile; each model reference may be a `{provider, model}` object or a `"provider/model"` string; `reasoning` also matches `reasoningEffort`/`effort` and shows `–` when absent; and `fallbacks` may be a single value or a list. In the table, the first two fallbacks appear as **Fallback 1** / **Fallback 2** and any beyond that collapse into **Final Fallback** (`(none)` when there are two or fewer). If your openclaw build uses different field names, adjust `_parse_profile` in `dashboard.py`.
 
 ## Installation
 
@@ -104,6 +129,7 @@ All configuration is via environment variables:
 | `DASHBOARD_USERS` | `hermes,openclaw` | Comma-separated users whose openclaw data is aggregated |
 | `DASHBOARD_PORT` | `8080` | Port to listen on |
 | `DASHBOARD_DATA_DIR` | `/var/lib/ai-agents-dashboard` | Directory for the SQLite database and session secret |
+| `DASHBOARD_MODEL_CONFIG` | `models.json,profiles.json,model-profiles.json,config.json` | Candidate model-config filenames per agent, tried in order |
 | `DASHBOARD_PASSWORD_HASH` | See script | SHA-256 hash of the login password |
 | `DASHBOARD_SECRET` | Auto-generated, persisted | Secret for session cookies |
 | `DASHBOARD_TZ` | `America/El_Salvador` | Timezone for chart labels and cron times |
@@ -117,8 +143,9 @@ All configuration is via environment variables:
 4. API Test / Memory & Disk / Speed Test
 5. Top Processes & Security Logins
 6. Active Cron Jobs (all users)
-7. Recent Memories (per user)
-8. Active & Resolved Issues (tagged by user)
+7. Model Configuration — All Profiles (per agent)
+8. Recent Memories (per user)
+9. Active & Resolved Issues (tagged by user)
 
 ## Notes
 
