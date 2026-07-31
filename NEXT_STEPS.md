@@ -24,7 +24,7 @@ Produced 2026-07-31 from a full code review of `dashboard.py` plus the owner's f
 - [x] F1.5 "Add server" dialog (with AI-agents step)
 - [x] F1.6 Remote actions (API test, speed test)
 - [x] F1.7 Documentation update
-- [ ] P2.1 Configurable network interface
+- [x] P2.1 Configurable network interface
 - [ ] P2.2 Safe SQLite handling (close + WAL)
 - [ ] P2.3 Close cooldown races
 - [ ] P2.4 Fix collector cadence drift

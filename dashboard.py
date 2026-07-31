@@ -56,6 +56,10 @@ MODEL_CONFIG_FILES = os.environ.get(
 # Filesystem to report disk usage for. In a container, set this to a bind mount
 # of the host root (e.g. /host) so the panel shows the server's disk, not the overlay.
 DISK_PATH = os.environ.get('DASHBOARD_DISK_PATH', '/')
+# Network interface to measure throughput on. 'auto' picks the first
+# non-loopback interface that has received traffic, which covers eth0, ens3,
+# enp0s3, wlan0 and friends without configuration.
+NET_IFACE = os.environ.get('DASHBOARD_NET_IFACE', 'auto').strip() or 'auto'
 LOCAL_TZ = ZoneInfo(os.environ.get('DASHBOARD_TZ', 'America/El_Salvador'))
 
 # Login password hash (sha256 of the actual password). Deliberately no default
@@ -130,6 +134,29 @@ def fetch_history(limit=DISPLAY_POINTS):
 
 # --------------------------------------------------------- metric collector
 
+def read_net_counters():
+    """(rx_bytes, tx_bytes) for the monitored interface, from /proc/net/dev.
+
+    Raises when nothing matches, so the caller reports it rather than
+    silently charting zeroes.
+    """
+    with open('/proc/net/dev') as f:
+        lines = f.readlines()
+    for line in lines:
+        name, sep, rest = line.partition(':')
+        name = name.strip()
+        if not sep or name == 'lo':
+            continue
+        fields = rest.split()
+        rx, tx = int(fields[0]), int(fields[8])
+        if NET_IFACE != 'auto':
+            if name == NET_IFACE:
+                return rx, tx
+        elif rx > 0:
+            return rx, tx
+    raise RuntimeError(f'no usable network interface (DASHBOARD_NET_IFACE={NET_IFACE})')
+
+
 def get_sys_info():
     """One snapshot of system stats, read from /proc and standard CLI tools.
 
@@ -183,15 +210,11 @@ def get_sys_info():
 
     # Network totals
     try:
-        with open('/proc/net/dev') as f:
-            for line in f:
-                if 'eth0:' in line or 'ens3:' in line:
-                    parts = line.split()
-                    info['net_rx'] = f"{int(parts[1])/1024/1024:.2f} MB"
-                    info['net_tx'] = f"{int(parts[9])/1024/1024:.2f} MB"
-                    info['net_rx_bytes'] = int(parts[1])
-                    info['net_tx_bytes'] = int(parts[9])
-                    break
+        rx, tx = read_net_counters()
+        info['net_rx'] = f"{rx/1024/1024:.2f} MB"
+        info['net_tx'] = f"{tx/1024/1024:.2f} MB"
+        info['net_rx_bytes'] = rx
+        info['net_tx_bytes'] = tx
     except Exception:
         info['net_rx'] = 'Error'
         info['net_tx'] = 'Error'

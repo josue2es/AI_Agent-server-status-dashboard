@@ -187,6 +187,7 @@ All configuration is via environment variables ([`.env.example`](.env.example) l
 | `DASHBOARD_PORT` | `8080` | Port to listen on |
 | `DASHBOARD_DATA_DIR` | `/var/lib/ai-agents-dashboard` | Directory for the SQLite database and session secret |
 | `DASHBOARD_DISK_PATH` | `/` | Filesystem whose disk usage is shown (point it at a host bind mount when containerized) |
+| `DASHBOARD_NET_IFACE` | `auto` | Interface to measure throughput on. `auto` picks the first non-loopback interface with received traffic |
 | `DASHBOARD_MODEL_CONFIG` | `models.json,profiles.json,model-profiles.json,config.json` | Candidate model-config filenames per agent, tried in order |
 | `DASHBOARD_PASSWORD_HASH` | Generated on first run | SHA-256 hash of the login password. When unset, a random password is generated, printed once to the log, and its hash persisted in the data dir |
 | `DASHBOARD_SECRET` | Auto-generated, persisted | Secret for session cookies |
