@@ -152,7 +152,7 @@ All configuration is via environment variables ([`.env.example`](.env.example) l
 
 ## Roadmap — multi-server monitoring (planned, not implemented yet)
 
-The next milestone turns this into a hub that monitors **many** servers — servers running AI agents and plain servers alike: a server selector on the main page, a headless "node mode" of the same `dashboard.py` exposing a token-protected JSON API, and a popup dialog to register new servers and AI agents from the UI (no CLI). The full spec with acceptance criteria is [NEXT_STEPS.md](NEXT_STEPS.md) section F1; implementation is assigned to the next agent.
+The next milestone turns this into a hub that monitors **many** servers — servers running AI agents and plain servers alike: a server selector on the main page, a headless "node mode" of the same `dashboard.py` exposing a token-protected JSON API, and a popup dialog to register new servers from the UI — asking, per server, whether it runs AI agents (e.g. Hermes/Openclaw) and which users to monitor (no CLI). The full spec with acceptance criteria is [NEXT_STEPS.md](NEXT_STEPS.md) section F1; implementation is assigned to the next agent.
 
 ## Architecture (for contributors & AI agents)
 
