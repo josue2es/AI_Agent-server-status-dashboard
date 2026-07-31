@@ -39,7 +39,7 @@ Sections are delimited by `# ---------------- <name>` comments. Grep the section
 | `speed test` | `do_speedtest` | Ookla CLI wrapper (~20 s, blocking), 1 h cooldown |
 | `server registry` | `load_servers`, `save_servers`, `all_servers`, `get_server` | `servers.json` (0600, holds node tokens); `local` is implicit and always first |
 | `data sources` | `source_snapshot`, `source_history`, `source_stats`, `source_agentdata`, `remote_apitest`, `remote_speedtest`, `_node_request` | the local/remote seam every panel reads through |
-| `node API` | `register_node_api`, `_node_authorized` | Bearer-token JSON API under `/api/*`; registered whenever `DASHBOARD_NODE_TOKEN` is set |
+| `node API` | `register_health`, `register_node_api`, `_node_authorized` | Bearer-token JSON API under `/api/*`, registered whenever `DASHBOARD_NODE_TOKEN` is set; plus unauthenticated `/health` in both modes |
 | `UI` | `make_chart`, `set_chart_data`, `section_card`, `servers_dialog`, `login_page`, `main_page` | NiceGUI pages; `main_page` is rebuilt per client, driven by two `ui.timer`s (15 s stats, 60 s agent data) plus a one-shot first paint |
 | `main` | `load_password_hash`, `load_storage_secret`, `__main__` guard | startup: mode validation, `init_db`, node API registration, collector thread, `ui.run` |
 
@@ -60,7 +60,7 @@ Sections are delimited by `# ---------------- <name>` comments. Grep the section
 ## Conventions
 
 - Single file, plain functions, no classes. Keep it that way unless explicitly asked to restructure.
-- New config = env var `DASHBOARD_*` with a default at the top of the file, plus a row in the README table and a line in `.env.example`.
+- New config = env var `DASHBOARD_*` with a default at the top of the file (comma-separated lists go through `env_list()`), plus a row in the README table and a line in `.env.example`.
 - Dark theme: page bg `#1e1e1e`, cards `#2d2d2d` with border `#444`, accent orange `#ff9900`, monospace font. Build new page blocks with `section_card(title)`.
 - English comments and strings; short docstrings on functions, section-divider comments between groups.
 

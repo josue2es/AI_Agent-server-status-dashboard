@@ -16,6 +16,7 @@ A self-hosted monitoring dashboard for a fleet of servers — those running AI a
 - **API health test** — test Anthropic, Google, and Moonshot/Kimi keys directly from the dashboard with latency measurement (keys are discovered across all configured users' auth profiles)
 - **Internet speed test** — powered by Ookla speedtest CLI, rate-limited to once per hour
 - **Password login** — session-based auth, sessions survive restarts
+- **Health endpoint** — unauthenticated `GET /health` for uptime monitors
 - **Zero token usage** — the dashboard itself makes no LLM calls
 
 ## Requirements
@@ -57,6 +58,8 @@ Every route requires `Authorization: Bearer <DASHBOARD_NODE_TOKEN>` and answers 
 | `GET /api/agentdata?users=a,b` | Cron jobs, memories, issues and model config for those users |
 | `POST /api/apitest` | Runs the API probe on that server (body `{"provider", "model"}`) |
 | `POST /api/speedtest` | Runs the speed test on that server |
+
+Separately, **`GET /health`** needs no token and is served in both modes — `{"status":"ok","mode":...,"last_sample_age_s":...}` for external uptime monitors. It carries no secrets and says nothing about other servers.
 
 Setting `DASHBOARD_NODE_TOKEN` on a hub also exposes these routes, so one hub can be monitored by another.
 

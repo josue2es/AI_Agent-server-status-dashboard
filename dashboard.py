@@ -31,8 +31,17 @@ from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse, RedirectResponse
 from nicegui import app, run, ui
 
+def env_list(name, default):
+    """Comma-separated env var as a clean list.
+
+    Whitespace and empty entries are dropped, so 'a, b' and a stray trailing
+    comma don't turn into lookups for ' b' or ''.
+    """
+    return [item.strip() for item in os.environ.get(name, default).split(',') if item.strip()]
+
+
 # Users whose agent workspaces are aggregated (cron jobs, memories, issues).
-AGENT_USERS = os.environ.get('DASHBOARD_USERS', 'hermes,openclaw').split(',')
+AGENT_USERS = env_list('DASHBOARD_USERS', 'hermes,openclaw')
 
 # Deployment mode. 'hub' serves the dashboard UI and pulls from registered
 # servers; 'node' is headless — collector plus the JSON API only.
@@ -51,9 +60,8 @@ SPEEDTEST_BIN = os.environ.get('SPEEDTEST_BIN', 'speedtest-ookla')
 # Candidate filenames (in order) for an agent's model/profile config, tried both
 # directly under the agent dir and under its 'agent/' subdir. Override with
 # DASHBOARD_MODEL_CONFIG (comma-separated).
-MODEL_CONFIG_FILES = os.environ.get(
-    'DASHBOARD_MODEL_CONFIG',
-    'models.json,profiles.json,model-profiles.json,config.json').split(',')
+MODEL_CONFIG_FILES = env_list(
+    'DASHBOARD_MODEL_CONFIG', 'models.json,profiles.json,model-profiles.json,config.json')
 # Filesystem to report disk usage for. In a container, set this to a bind mount
 # of the host root (e.g. /host) so the panel shows the server's disk, not the overlay.
 DISK_PATH = os.environ.get('DASHBOARD_DISK_PATH', '/')
@@ -75,8 +83,12 @@ DISPLAY_POINTS = 720  # 3 hours of 15s samples shown on charts
 REMOTE_TIMEOUT = 4  # seconds for a hub -> node data call
 REMOTE_ACTION_TIMEOUT = 90  # seconds for a hub -> node action (API / speed test)
 
+# Exact provider model IDs only — never construct or date-suffix one. The
+# Google and Moonshot lists are left as-is: they were not re-verified against
+# those providers' docs, and a wrong ID here is a 404 at test time.
 MODEL_OPTIONS = {
-    'anthropic': ['claude-sonnet-4-6', 'claude-haiku-4-5-20251001', 'claude-opus-4-6'],
+    'anthropic': ['claude-opus-5', 'claude-sonnet-5', 'claude-haiku-4-5-20251001',
+                  'claude-opus-4-6', 'claude-sonnet-4-6'],
     'google': ['gemini-3.1-pro-preview', 'gemini-3.1-flash-lite-preview'],
     'moonshot': ['kimi-k2.5', 'moonshot-v1-8k', 'moonshot-v1-32k'],
 }
@@ -298,6 +310,7 @@ def collector():
             with latest_lock:
                 latest.clear()
                 latest.update(data)
+                latest['sampled_at'] = time.time()  # drives /health
         except Exception as e:
             print(f"Collector error: {e}")
         # Sleep the remainder of the interval, not a full interval on top of a
@@ -334,18 +347,42 @@ def get_cron_jobs(users=None):
     return jobs
 
 
+def _latest_memory_file(memory_dir, today):
+    """(path, date) of today's memory file, else the newest one there.
+
+    An agent that hasn't written yet today still has history worth showing,
+    so fall back rather than claiming there are no memories at all.
+    """
+    todays = os.path.join(memory_dir, f'{today}.md')
+    if os.path.exists(todays):
+        return todays, today
+    try:
+        names = sorted(n for n in os.listdir(memory_dir) if n.endswith('.md'))
+    except Exception:
+        return None, None
+    if not names:
+        return None, None
+    return os.path.join(memory_dir, names[-1]), names[-1][:-3]
+
+
 def get_memories(users=None):
-    """Last 5 memory entries of today per agent user."""
+    """Last 5 memory entries per agent user, from today's file or the newest."""
     memories = {}
     today = datetime.now(LOCAL_TZ).strftime('%Y-%m-%d')
     for user in (AGENT_USERS if users is None else users):
-        path = user_path(user, 'workspace', 'memory', f'{today}.md')
+        path, day = _latest_memory_file(user_path(user, 'workspace', 'memory'), today)
+        if not path:
+            memories[user] = ['No recent memories.']
+            continue
         try:
             with open(path) as f:
                 lines = [l.strip() for l in f if l.strip().startswith('-')]
-            memories[user] = lines[-5:] or ['No recent memories.']
         except Exception:
             memories[user] = ['No recent memories.']
+            continue
+        # Label anything older than today so it can't be mistaken for current.
+        stale = '' if day == today else f' (from {day})'
+        memories[user] = [f'{line}{stale}' for line in lines[-5:]] or ['No recent memories.']
     return memories
 
 
@@ -790,6 +827,21 @@ def _users_param(raw):
     """Parse a 'users' query value; None means 'this server's own list'."""
     users = [u.strip() for u in (raw or '').split(',') if u.strip()]
     return users or None
+
+
+def register_health():
+    """Unauthenticated liveness probe for external uptime monitors.
+
+    Deliberately free of secrets and of anything about other servers — it
+    reports only that this process is up and how fresh its own sample is.
+    """
+
+    @app.get('/health')
+    def health():
+        with latest_lock:
+            stamp = latest.get('sampled_at')
+        return {'status': 'ok', 'mode': MODE,
+                'last_sample_age_s': round(time.time() - stamp, 1) if stamp else None}
 
 
 def register_node_api():
@@ -1430,6 +1482,7 @@ if __name__ in {'__main__', '__mp_main__'}:
     init_db()
     if MODE == 'hub':
         PASSWORD_HASH = load_password_hash()
+    register_health()
     if NODE_TOKEN:
         register_node_api()
     app.on_startup(lambda: threading.Thread(target=collector, daemon=True).start())
