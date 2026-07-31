@@ -1,6 +1,6 @@
-# Openclaw Server Status Dashboard
+# AI Agents Dashboard
 
-A self-hosted server monitoring dashboard for servers running [openclaw](https://openclaw.ai). Built with Python and [NiceGUI](https://nicegui.io). Runs as a system (root) service and aggregates openclaw data — cron jobs, agent memories, and issues — from **multiple user accounts** on the same server.
+A self-hosted server monitoring dashboard for hosts running AI agents. Built with Python and [NiceGUI](https://nicegui.io). Runs as a system (root) service and aggregates agent data — cron jobs, memories, and issues — from **multiple user accounts** on the same server. Agent data is currently read from each user's [openclaw](https://openclaw.ai) workspace.
 
 ![Dashboard](https://img.shields.io/badge/python-3.10%2B-blue) ![License](https://img.shields.io/badge/license-MIT-green)
 
@@ -11,6 +11,7 @@ A self-hosted server monitoring dashboard for servers running [openclaw](https:/
 - **Live system stats** — CPU, RAM, disk, network throughput, ping/jitter/packet loss
 - **Historical charts** — rolling window of the last 720 samples (~3 h), 24-hour retention in SQLite (ECharts)
 - **Multi-user openclaw integration** — displays active cron jobs, agent memories, and issues from every configured user (default: `hermes` and `openclaw`), each entry tagged with its owner
+- **Model configuration** — a per-agent table of each profile's primary provider/model, reasoning level, and fallback chain, across every agent of every user
 - **API health test** — test Anthropic, Google, and Moonshot/Kimi keys directly from the dashboard with latency measurement (keys are discovered across all configured users' auth profiles)
 - **Internet speed test** — powered by Ookla speedtest CLI, rate-limited to once per hour
 - **Password login** — session-based auth, sessions survive restarts
@@ -33,17 +34,44 @@ The dashboard runs as root and reads each configured user's openclaw workspace:
 | Agent memories | `/home/<user>/.openclaw/workspace/memory/<today>.md` |
 | Issues | `/home/<user>/.openclaw/workspace/ISSUES.md` |
 | API auth profiles | `/home/<user>/.openclaw/agents/main/agent/auth-profiles.json` |
+| Model config | `/home/<user>/.openclaw/agents/<agent>/[agent/]{models,profiles,model-profiles,config}.json` |
 
 The user list is controlled by the `DASHBOARD_USERS` environment variable (comma-separated, default `hermes,openclaw`). Missing files for a user are skipped silently.
+
+### Model configuration format
+
+Each agent under `/home/<user>/.openclaw/agents/` is scanned for a model-config file (the candidate filenames are configurable via `DASHBOARD_MODEL_CONFIG`, tried in order, both directly in the agent directory and in its `agent/` subdirectory). The expected shape is a `profiles` map where each profile carries its own primary model, reasoning level, and ordered fallback chain:
+
+```json
+{
+  "profiles": {
+    "default": {
+      "provider": "zai",
+      "model": "glm-5.2",
+      "reasoning": "max",
+      "fallbacks": [
+        { "provider": "deepseek", "model": "deepseek-v4-pro" },
+        { "provider": "kimi-coding", "model": "kimi-k2.6" },
+        { "provider": "gemini", "model": "gemini-3-pro-preview" }
+      ]
+    }
+  }
+}
+```
+
+The parser is tolerant of common variations: the primary can be a nested `primary` object or `provider`/`model` fields on the profile; each model reference may be a `{provider, model}` object or a `"provider/model"` string; `reasoning` also matches `reasoningEffort`/`effort` and shows `–` when absent; and `fallbacks` may be a single value or a list. In the table, the first two fallbacks appear as **Fallback 1** / **Fallback 2** and any beyond that collapse into **Final Fallback** (`(none)` when there are two or fewer). If your openclaw build uses different field names, adjust `_parse_profile` in `dashboard.py`.
 
 ## Installation
 
 ### 1. Copy the script and install dependencies
 
+Install into a virtualenv so the Python dependencies stay off your system Python:
+
 ```bash
-sudo mkdir -p /opt/openclaw-dashboard
-sudo cp dashboard.py requirements.txt /opt/openclaw-dashboard/
-sudo pip install -r /opt/openclaw-dashboard/requirements.txt
+sudo mkdir -p /opt/ai-agents-dashboard
+sudo cp dashboard.py requirements.txt /opt/ai-agents-dashboard/
+sudo python3 -m venv /opt/ai-agents-dashboard/venv
+sudo /opt/ai-agents-dashboard/venv/bin/pip install -r /opt/ai-agents-dashboard/requirements.txt
 ```
 
 ### 2. Set your password
@@ -57,14 +85,15 @@ echo -n 'your-password' | sha256sum
 ### 3. Create the systemd service (runs as root)
 
 ```bash
-sudo tee /etc/systemd/system/openclaw-dashboard.service << 'EOF'
+sudo tee /etc/systemd/system/ai-agents-dashboard.service << 'EOF'
 [Unit]
-Description=Openclaw Server Status Dashboard
+Description=AI Agents Dashboard
 After=network.target
 
 [Service]
-ExecStart=/usr/bin/python3 /opt/openclaw-dashboard/dashboard.py
+ExecStart=/opt/ai-agents-dashboard/venv/bin/python /opt/ai-agents-dashboard/dashboard.py
 Environment=DASHBOARD_USERS=hermes,openclaw
+Environment=DASHBOARD_TZ=America/El_Salvador
 # Environment=DASHBOARD_PASSWORD_HASH=<your sha256 hash>
 Restart=on-failure
 RestartSec=5
@@ -78,10 +107,20 @@ EOF
 
 ```bash
 sudo systemctl daemon-reload
-sudo systemctl enable --now openclaw-dashboard
+sudo systemctl enable --now ai-agents-dashboard
 ```
 
 The dashboard will be available at `http://localhost:8080`.
+
+The service runs as root because it reads each user's `/home/<user>/.openclaw` directory and host-level facilities (`/proc`, `ps`, `ping`, login history). It is a single process with no inbound dependencies beyond the login page.
+
+### Updating
+
+```bash
+sudo cp dashboard.py /opt/ai-agents-dashboard/
+sudo /opt/ai-agents-dashboard/venv/bin/pip install -r /opt/ai-agents-dashboard/requirements.txt  # if deps changed
+sudo systemctl restart ai-agents-dashboard
+```
 
 ## Configuration
 
@@ -91,7 +130,8 @@ All configuration is via environment variables ([`.env.example`](.env.example) l
 |---|---|---|
 | `DASHBOARD_USERS` | `hermes,openclaw` | Comma-separated users whose openclaw data is aggregated |
 | `DASHBOARD_PORT` | `8080` | Port to listen on |
-| `DASHBOARD_DATA_DIR` | `/var/lib/openclaw-dashboard` | Directory for the SQLite database and session secret |
+| `DASHBOARD_DATA_DIR` | `/var/lib/ai-agents-dashboard` | Directory for the SQLite database and session secret |
+| `DASHBOARD_MODEL_CONFIG` | `models.json,profiles.json,model-profiles.json,config.json` | Candidate model-config filenames per agent, tried in order |
 | `DASHBOARD_PASSWORD_HASH` | See script | SHA-256 hash of the login password |
 | `DASHBOARD_SECRET` | Auto-generated, persisted | Secret for session cookies |
 | `DASHBOARD_TZ` | `America/El_Salvador` | Timezone for chart labels and cron times |
@@ -105,8 +145,9 @@ All configuration is via environment variables ([`.env.example`](.env.example) l
 4. API Test / Memory & Disk / Speed Test
 5. Top Processes & Security Logins
 6. Active Cron Jobs (all users)
-7. Recent Memories (per user)
-8. Active & Resolved Issues (tagged by user)
+7. Model Configuration — All Profiles (per agent)
+8. Recent Memories (per user)
+9. Active & Resolved Issues (tagged by user)
 
 ## Roadmap — multi-server monitoring (planned, not implemented yet)
 
