@@ -15,24 +15,24 @@ Produced 2026-07-31 from a full code review of `dashboard.py` plus the owner's f
 
 ## Task list
 
-- [ ] P1.1 Remove default password hash
-- [ ] P1.2 Google API key out of the URL
-- [ ] F1.1 Data-source seam (local vs remote)
-- [ ] F1.2 Node mode + JSON API + token auth
-- [ ] F1.3 Server registry (`servers.json`)
-- [ ] F1.4 Server selector on the main page
-- [ ] F1.5 "Add server" dialog (with AI-agents step)
-- [ ] F1.6 Remote actions (API test, speed test)
-- [ ] F1.7 Documentation update
-- [ ] P2.1 Configurable network interface
-- [ ] P2.2 Safe SQLite handling (close + WAL)
-- [ ] P2.3 Close cooldown races
-- [ ] P2.4 Fix collector cadence drift
-- [ ] P3.1 Memories fallback to latest file
-- [ ] P3.2 Refresh MODEL_OPTIONS
-- [ ] P3.3 Pin nicegui upper bound
-- [ ] P3.4 /health endpoint
-- [ ] P3.5 Env-list hygiene
+- [x] P1.1 Remove default password hash
+- [x] P1.2 Google API key out of the URL
+- [x] F1.1 Data-source seam (local vs remote)
+- [x] F1.2 Node mode + JSON API + token auth
+- [x] F1.3 Server registry (`servers.json`)
+- [x] F1.4 Server selector on the main page
+- [x] F1.5 "Add server" dialog (with AI-agents step)
+- [x] F1.6 Remote actions (API test, speed test)
+- [x] F1.7 Documentation update
+- [x] P2.1 Configurable network interface
+- [x] P2.2 Safe SQLite handling (close + WAL)
+- [x] P2.3 Close cooldown races
+- [x] P2.4 Fix collector cadence drift
+- [x] P3.1 Memories fallback to latest file
+- [x] P3.2 Refresh MODEL_OPTIONS
+- [x] P3.3 Pin nicegui upper bound
+- [x] P3.4 /health endpoint
+- [x] P3.5 Env-list hygiene
 
 ## P1 — Security (land these first; they are small)
 
@@ -145,10 +145,15 @@ Hub→node transport: HTTP JSON via `urllib` with `Authorization: Bearer <token>
 `get_memories`: when today's file is missing, fall back to the newest `*.md` in `workspace/memory/`, labeled with its date, instead of "No recent memories."
 
 ### P3.2 Refresh MODEL_OPTIONS
+
+> **Implemented for Anthropic only.** Added `claude-opus-5` and `claude-sonnet-5`, kept the 4.x entries. Google and Moonshot were left untouched: their IDs were not re-verified against those providers' docs, and the standing rule is never to guess a model ID.
+
 Current IDs are valid but aging. Rules: exact provider model IDs only — never invent or date-suffix them. Anthropic (valid as of 2026-07): may add `claude-opus-5` and `claude-sonnet-5`; keep `claude-haiku-4-5-20251001`. Google/Moonshot: verify against their official docs first. Optionally support override env `DASHBOARD_MODELS` (JSON, same shape as `MODEL_OPTIONS`).
 
 ### P3.3 Pin dependency
 `requirements.txt`: `nicegui>=2.0,<3`.
+
+> **Deviation on implementation:** pinned `<4`, not `<3`. NiceGUI 3.x is the current major and is what a fresh `pip install` resolves to; `<3` would have forced a downgrade. The code was verified against 3.15.0. The task's intent — block an unattended major upgrade — is met.
 
 ### P3.4 /health endpoint
 Unauthenticated `GET /health` → 200 + `{"status": "ok", "last_sample_age_s": ...}` from `latest`, for uptime monitors. Read-only, secret-free, available in both modes.

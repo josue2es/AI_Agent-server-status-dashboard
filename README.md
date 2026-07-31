@@ -1,6 +1,6 @@
 # AI Agents Dashboard
 
-A self-hosted server monitoring dashboard for hosts running AI agents. Built with Python and [NiceGUI](https://nicegui.io). Runs as a system (root) service and aggregates agent data — cron jobs, memories, and issues — from **multiple user accounts** on the same server. Agent data is currently read from each user's [openclaw](https://openclaw.ai) workspace.
+A self-hosted monitoring dashboard for a fleet of servers — those running AI agents and plain servers alike. Built with Python and [NiceGUI](https://nicegui.io). Runs as a system (root) service, monitors any number of servers from one page, and aggregates agent data — cron jobs, memories, issues, and model configuration — from the user accounts you point it at. Agent data is currently read from each user's [openclaw](https://openclaw.ai) workspace.
 
 ![Dashboard](https://img.shields.io/badge/python-3.10%2B-blue) ![License](https://img.shields.io/badge/license-MIT-green)
 
@@ -8,21 +8,60 @@ A self-hosted server monitoring dashboard for hosts running AI agents. Built wit
 
 ## Features
 
+- **Multi-server monitoring** — pick a server from the header and the whole page reloads for it. Add servers from a popup dialog (no CLI, no restart); each one is asked whether it runs AI agents, and the agent panels only appear for those that do
 - **Live system stats** — CPU, RAM, disk, network throughput, ping/jitter/packet loss
 - **Historical charts** — rolling window of the last 720 samples (~3 h), 24-hour retention in SQLite (ECharts)
-- **Multi-user openclaw integration** — displays active cron jobs, agent memories, and issues from every configured user (default: `hermes` and `openclaw`), each entry tagged with its owner
+- **AI agent integration** — displays active cron jobs, agent memories, and issues from every configured user (default: `hermes` and `openclaw`), each entry tagged with its owner
 - **Model configuration** — a per-agent table of each profile's primary provider/model, reasoning level, and fallback chain, across every agent of every user
 - **API health test** — test Anthropic, Google, and Moonshot/Kimi keys directly from the dashboard with latency measurement (keys are discovered across all configured users' auth profiles)
 - **Internet speed test** — powered by Ookla speedtest CLI, rate-limited to once per hour
 - **Password login** — session-based auth, sessions survive restarts
+- **Health endpoint** — unauthenticated `GET /health` for uptime monitors
 - **Zero token usage** — the dashboard itself makes no LLM calls
 
 ## Requirements
 
 - Python 3.10+
 - [NiceGUI](https://nicegui.io) (`pip install -r requirements.txt`)
-- A server running [openclaw](https://openclaw.ai) under one or more user accounts
+- Optional: [openclaw](https://openclaw.ai) under one or more user accounts, for the AI-agent panels
 - Ookla speedtest CLI on `PATH` as `speedtest-ookla` (optional, for the speed test feature)
+
+## Monitoring more than one server
+
+The same `dashboard.py` runs in two modes, selected by `DASHBOARD_MODE`:
+
+| Mode | What it does |
+|---|---|
+| `hub` (default) | Serves the dashboard UI, monitors its own host, and pulls from every registered server |
+| `node` | Headless: samples its own metrics and serves a token-protected JSON API. No login page, no UI — `/` returns 404 |
+
+To monitor a server, copy `dashboard.py` there, run it in node mode with a shared secret, then register it from the hub's UI:
+
+```bash
+# On the server you want to monitor:
+DASHBOARD_MODE=node DASHBOARD_NODE_TOKEN=$(openssl rand -hex 32) python3 dashboard.py
+```
+
+Then in the hub, click **⚙ Manage servers**, enter the server's name, base URL and that token, and answer whether it runs AI agents — if it does, list the usernames to monitor. The hub calls the node's `/api/ping` and only saves the entry once it validates; the new server shows up in the selector immediately, with no restart.
+
+Registered servers live in `DASHBOARD_DATA_DIR/servers.json` (mode `0600` — it holds tokens). The local server is implicit and needs no entry; its agent users default to `DASHBOARD_USERS` and can be overridden from the same dialog. Metrics are **not** centralized: each node keeps its own SQLite history and the hub reads it on demand.
+
+### Node API
+
+Every route requires `Authorization: Bearer <DASHBOARD_NODE_TOKEN>` and answers 401 otherwise.
+
+| Route | Returns |
+|---|---|
+| `GET /api/ping` | Reachability + auth check (`{"ok": true, "mode", "name", "agents"}`) |
+| `GET /api/snapshot` | The latest system snapshot |
+| `GET /api/history?limit=720` | Chart history |
+| `GET /api/agentdata?users=a,b` | Cron jobs, memories, issues and model config for those users |
+| `POST /api/apitest` | Runs the API probe on that server (body `{"provider", "model"}`) |
+| `POST /api/speedtest` | Runs the speed test on that server |
+
+Separately, **`GET /health`** needs no token and is served in both modes — `{"status":"ok","mode":...,"last_sample_age_s":...}` for external uptime monitors. It carries no secrets and says nothing about other servers.
+
+Setting `DASHBOARD_NODE_TOKEN` on a hub also exposes these routes, so one hub can be monitored by another.
 
 ## How multi-user aggregation works
 
@@ -114,6 +153,22 @@ The dashboard will be available at `http://localhost:8080`.
 
 The service runs as root because it reads each user's `/home/<user>/.openclaw` directory and host-level facilities (`/proc`, `ps`, `ping`, login history). It is a single process with no inbound dependencies beyond the login page.
 
+### 5. On each monitored server (node mode)
+
+Install exactly as above, then use this unit instead — no password is needed, since a node has no UI:
+
+```bash
+[Service]
+ExecStart=/opt/ai-agents-dashboard/venv/bin/python /opt/ai-agents-dashboard/dashboard.py
+Environment=DASHBOARD_MODE=node
+Environment=DASHBOARD_NODE_TOKEN=<openssl rand -hex 32>
+Environment=DASHBOARD_USERS=hermes
+Restart=on-failure
+RestartSec=5
+```
+
+Then register it from the hub's **⚙ Manage servers** dialog.
+
 ### Updating
 
 ```bash
@@ -128,18 +183,23 @@ All configuration is via environment variables ([`.env.example`](.env.example) l
 
 | Variable | Default | Description |
 |---|---|---|
-| `DASHBOARD_USERS` | `hermes,openclaw` | Comma-separated users whose openclaw data is aggregated |
+| `DASHBOARD_USERS` | `hermes,openclaw` | Comma-separated users whose openclaw data is aggregated (default agent list for the local server) |
+| `DASHBOARD_MODE` | `hub` | `hub` serves the dashboard UI; `node` is headless and serves only the JSON API |
+| `DASHBOARD_NODE_TOKEN` | *(unset)* | Shared secret a hub presents to read this server's API. Required in node mode; setting it on a hub also exposes its API |
+| `DASHBOARD_NODE_NAME` | hostname | Name this server reports on `/api/ping` |
 | `DASHBOARD_PORT` | `8080` | Port to listen on |
 | `DASHBOARD_DATA_DIR` | `/var/lib/ai-agents-dashboard` | Directory for the SQLite database and session secret |
 | `DASHBOARD_DISK_PATH` | `/` | Filesystem whose disk usage is shown (point it at a host bind mount when containerized) |
+| `DASHBOARD_NET_IFACE` | `auto` | Interface to measure throughput on. `auto` picks the first non-loopback interface with received traffic |
 | `DASHBOARD_MODEL_CONFIG` | `models.json,profiles.json,model-profiles.json,config.json` | Candidate model-config filenames per agent, tried in order |
-| `DASHBOARD_PASSWORD_HASH` | See script | SHA-256 hash of the login password |
+| `DASHBOARD_PASSWORD_HASH` | Generated on first run | SHA-256 hash of the login password. When unset, a random password is generated, printed once to the log, and its hash persisted in the data dir |
 | `DASHBOARD_SECRET` | Auto-generated, persisted | Secret for session cookies |
 | `DASHBOARD_TZ` | `America/El_Salvador` | Timezone for chart labels and cron times |
 | `SPEEDTEST_BIN` | `speedtest-ookla` | Path to the Ookla speedtest CLI |
 
 ## Dashboard Layout
 
+0. Server selector + **⚙ Manage servers** (header)
 1. Live Resource Usage (CPU & RAM)
 2. Network Stats (latency, jitter, packet loss)
 3. Network Throughput
@@ -150,13 +210,11 @@ All configuration is via environment variables ([`.env.example`](.env.example) l
 8. Recent Memories (per user)
 9. Active & Resolved Issues (tagged by user)
 
-## Roadmap — multi-server monitoring (planned, not implemented yet)
-
-The next milestone turns this into a hub that monitors **many** servers — servers running AI agents and plain servers alike: a server selector on the main page, a headless "node mode" of the same `dashboard.py` exposing a token-protected JSON API, and a popup dialog to register new servers from the UI — asking, per server, whether it runs AI agents (e.g. Hermes/Openclaw) and which users to monitor (no CLI). The full spec with acceptance criteria is [NEXT_STEPS.md](NEXT_STEPS.md) section F1; implementation is assigned to the next agent.
-
 ## Architecture (for contributors & AI agents)
 
-Everything lives in one file, [`dashboard.py`](dashboard.py) (~860 lines), organized in sections marked with `# ---------------- <name>` comments: env config → `database` → `metric collector` (daemon thread, 15 s sampling) → `multi-user agent data` → `model / profile config` → `API test` → `speed test` → `UI` (NiceGUI pages) → `main`.
+Everything lives in one file, [`dashboard.py`](dashboard.py), organized in sections marked with `# ---------------- <name>` comments: env config → `database` → `metric collector` (daemon thread, 15 s sampling) → `multi-user agent data` → `model / profile config` → `API test` → `speed test` → `server registry` → `data sources` → `node API` → `UI` (NiceGUI pages) → `main`.
+
+Every panel reads through the `data sources` seam (`source_snapshot` / `source_history` / `source_agentdata`), which returns the same shapes whether the selected server is local or remote — so the UI never branches on where the data came from.
 
 **Read [CLAUDE.md](CLAUDE.md) before touching the code** — it has the function-level code map, threading model, conventions, and gotchas, so you can grep straight to the right section instead of reading the whole file.
 
@@ -173,14 +231,16 @@ Conventions: single file, plain functions, env-var config (`DASHBOARD_*`, read o
 
 ## Security notes
 
-- **Always set `DASHBOARD_PASSWORD_HASH`.** The source ships a default hash, so an unconfigured deployment has a known password (fix pending — see NEXT_STEPS.md P1).
-- The dashboard serves plain HTTP on `0.0.0.0`. Put it behind a TLS reverse proxy (nginx/caddy) or keep it on a private interface/VPN before exposing it.
+- **Set `DASHBOARD_PASSWORD_HASH`.** Left unset, the dashboard generates a random password on first start and prints it once to the log (`journalctl -u ai-agents-dashboard`) — recoverable, but easy to miss. There is no default password in the source.
+- **Node tokens are secrets.** Generate one per server (`openssl rand -hex 32`), never reuse them, and keep `servers.json` at mode `0600` — the dashboard writes it that way, so don't loosen it.
+- **Hub → node traffic is plain HTTP** unless you proxy it. Keep nodes on a private interface, a LAN, or a VPN, or front them with a TLS reverse proxy. A node with a reachable port and a leaked token exposes its metrics and lets a caller trigger API and speed tests on it.
+- The dashboard itself serves plain HTTP on `0.0.0.0`. Put it behind a TLS reverse proxy (nginx/caddy) or keep it on a private interface/VPN before exposing it.
 - It runs as **root** and reads every configured user's `~/.openclaw`, including `auth-profiles.json` (API keys) for the API test panel. Only configure users whose data the dashboard operator may see.
 
 ## Notes
 
-- The dashboard runs entirely on the server — no external services, no token usage
-- System metrics (CPU, RAM, network) are sampled every 15 seconds by a background collector
+- The dashboard runs entirely on your own servers — no external services, no token usage
+- System metrics (CPU, RAM, network) are sampled every 15 seconds by a background collector on each server
 - Agent data (cron jobs, model config, memories, issues) refreshes every 60 seconds
 - All metric data is stored locally in SQLite with 24-hour retention
 
