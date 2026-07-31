@@ -42,10 +42,10 @@ MODEL_CONFIG_FILES = os.environ.get(
 DISK_PATH = os.environ.get('DASHBOARD_DISK_PATH', '/')
 LOCAL_TZ = ZoneInfo(os.environ.get('DASHBOARD_TZ', 'America/El_Salvador'))
 
-# Password hash (sha256 of the actual password)
-PASSWORD_HASH = os.environ.get(
-    'DASHBOARD_PASSWORD_HASH',
-    'd8e87dbe011188ad0968f1f57e259bd9a8465f353f5032485e8d482e46574dcc')
+# Login password hash (sha256 of the actual password). Deliberately no default
+# in the source: when DASHBOARD_PASSWORD_HASH is unset, load_password_hash()
+# mints a random password on first start and persists only its hash.
+PASSWORD_HASH = os.environ.get('DASHBOARD_PASSWORD_HASH', '').strip()
 
 APITEST_COOLDOWN = 30  # seconds between tests per model
 SPEEDTEST_COOLDOWN = 3600  # seconds between speed tests
@@ -471,8 +471,11 @@ def test_api(provider, model):
                 'contents': [{'parts': [{'text': 'Reply with just: OK'}]}],
                 'generationConfig': {'maxOutputTokens': 10},
             }).encode()
-            url = f'https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={key}'
-            req = urllib.request.Request(url, data=payload, headers={'Content-Type': 'application/json'})
+            # Key goes in a header, never the URL — query strings land in proxy logs.
+            url = f'https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent'
+            req = urllib.request.Request(
+                url, data=payload,
+                headers={'Content-Type': 'application/json', 'x-goog-api-key': key})
             with urllib.request.urlopen(req, timeout=15) as resp:
                 data = json.loads(resp.read())
                 reply = data.get('candidates', [{}])[0].get('content', {}).get('parts', [{}])[0].get('text', '').strip()
@@ -595,7 +598,8 @@ def login_page():
 
     def try_login():
         submitted = hashlib.sha256(password.value.encode()).hexdigest()
-        if hmac.compare_digest(submitted, PASSWORD_HASH):
+        # No configured hash means no way in — fail closed rather than open.
+        if PASSWORD_HASH and hmac.compare_digest(submitted, PASSWORD_HASH):
             app.storage.user['authenticated'] = True
             ui.navigate.to('/')
         else:
@@ -825,6 +829,37 @@ def main_page():
 
 # ------------------------------------------------------------------ main
 
+def load_password_hash():
+    """Login password hash: the env var, else a persisted one, else generated.
+
+    With DASHBOARD_PASSWORD_HASH unset we mint a random password on first
+    start, print it once, and store only its sha256 (0600) so later boots
+    keep working. The source ships no default hash on purpose.
+    """
+    if PASSWORD_HASH:
+        return PASSWORD_HASH
+    os.makedirs(DATA_DIR, exist_ok=True)
+    path = os.path.join(DATA_DIR, '.password_hash')
+    try:
+        with open(path) as f:
+            stored = f.read().strip()
+        if stored:
+            return stored
+    except FileNotFoundError:
+        pass
+    password = secrets.token_urlsafe(12)
+    digest = hashlib.sha256(password.encode()).hexdigest()
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, 'w') as f:
+        f.write(digest)
+    print('=' * 66, flush=True)
+    print('  DASHBOARD_PASSWORD_HASH is not set — generated a login password:', flush=True)
+    print(f'      {password}', flush=True)
+    print('  Shown once. Set DASHBOARD_PASSWORD_HASH to choose your own.', flush=True)
+    print('=' * 66, flush=True)
+    return digest
+
+
 def load_storage_secret():
     """Persistent secret so login sessions survive restarts."""
     secret = os.environ.get('DASHBOARD_SECRET')
@@ -846,6 +881,7 @@ def load_storage_secret():
 # NiceGUI may re-import this module in a child process, hence the '__mp_main__' guard.
 if __name__ in {'__main__', '__mp_main__'}:
     init_db()
+    PASSWORD_HASH = load_password_hash()
     app.on_startup(lambda: threading.Thread(target=collector, daemon=True).start())
     ui.run(
         host='0.0.0.0',
