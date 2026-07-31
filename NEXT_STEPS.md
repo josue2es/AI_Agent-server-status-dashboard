@@ -21,7 +21,7 @@ Produced 2026-07-31 from a full code review of `dashboard.py` plus the owner's f
 - [ ] F1.2 Node mode + JSON API + token auth
 - [ ] F1.3 Server registry (`servers.json`)
 - [ ] F1.4 Server selector on the main page
-- [ ] F1.5 "Add server / Add AI agent" dialog
+- [ ] F1.5 "Add server" dialog (with AI-agents step)
 - [ ] F1.6 Remote actions (API test, speed test)
 - [ ] F1.7 Documentation update
 - [ ] P2.1 Configurable network interface
@@ -50,7 +50,9 @@ Produced 2026-07-31 from a full code review of `dashboard.py` plus the owner's f
 
 ## F1 — Multi-server monitoring (main mandate)
 
-**Goal:** the dashboard monitors many servers — servers running AI agents and plain servers with none. The main page gets a **server selector**; picking a server loads every metric that applies to it. A **popup dialog** (`ui.dialog`) registers new servers and new AI agents entirely from the UI — no CLI, no env editing, no restart.
+**Goal:** the dashboard monitors many servers — servers running AI agents and plain servers with none. The main page gets a **server selector**; picking a server loads every metric that applies to it. A **popup dialog** (`ui.dialog`) registers new servers entirely from the UI: it asks for the info required to monitor the server, then asks whether the server runs AI agents (e.g. Hermes / Openclaw) and, if so, collects the info required for those — no CLI, no env editing, no restart.
+
+Note: the existing multi-user aggregation (`DASHBOARD_USERS`) stays as-is; it also covers the common case of a server with a **single** agent user — nothing in F1 requires more than one.
 
 **Architecture (decided — follow it, don't redesign):** one file, two modes selected by env `DASHBOARD_MODE`:
 
@@ -92,13 +94,15 @@ Hub→node transport: HTTP JSON via `urllib` with `Authorization: Bearer <token>
   - An unreachable node renders a visible inline error in the affected cards (e.g. "node unreachable: <err>") — never an unhandled exception, never a blank page.
 - **Accept:** switching servers swaps charts and cards without reload; a plain server (no agents) shows no AI-agent cards; killing a remote node degrades to inline errors.
 
-### F1.5 "Add server / Add AI agent" dialog (the popup menu)
-- **Change:** a button in the header (e.g. ⚙ "Manage servers") opens a `ui.dialog` with:
-  - **Add server:** fields name, base URL, token, optional comma-separated agent users. On save: call that node's `GET /api/ping` with the token; only persist to `servers.json` if it validates. The selector updates immediately, no restart.
-  - **Add AI agent:** pick an existing server (including `local`) + username; appends to that server's `agents` list in `servers.json`.
-  - **Remove server:** list with a delete button per entry + confirm step.
+### F1.5 "Add server" dialog (the popup menu)
+- **Change:** a button in the header (e.g. ⚙ "Manage servers") opens a `ui.dialog` with a guided add-server flow:
+  1. **Monitoring info:** name, base URL, node token — what's required to monitor the server.
+  2. **AI-agents question, same dialog:** "Does this server run AI agents to monitor (e.g. Hermes / Openclaw)?" (toggle, default off). If **yes**, collect the info required for them: the Linux usernames running the agents (one row per user; one user is the common case, more are allowed). If **no**, the server registers as a plain server and will show only system metrics.
+  3. **On save:** call the node's `GET /api/ping` with the token; only persist to `servers.json` if it validates. The selector updates immediately, no restart.
+  - **Edit server:** reopen an existing entry to add/remove agent users later (covers "I forgot to add the Hermes agent" without re-registering).
+  - **Remove server:** delete button per entry + confirm step.
   - Validation failures (bad URL, bad token, duplicate name, empty fields) show an inline error and persist nothing.
-- **Accept:** the full add-server and add-agent flows work from the UI with zero CLI involvement; invalid input never mutates `servers.json`.
+- **Accept:** the full add-server flow — with and without agents — works from the UI with zero CLI involvement; invalid input never mutates `servers.json`.
 
 ### F1.6 Remote actions
 - **Change:** the API test and speed test buttons act on the *selected* server: local keeps today's path; remote POSTs to the node's `/api/apitest` / `/api/speedtest` via `run.io_bound`. Cooldown/ratelimit messages returned by the node are shown as-is.
