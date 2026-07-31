@@ -84,6 +84,9 @@ MODEL_OPTIONS = {
 apitest_times = {}  # (provider, model) -> last test timestamp
 last_speedtest_time = 0.0
 cached_speedtest_result = 'Not run yet.'
+# Cooldown state is shared by every connected client and by the node API,
+# so claiming a slot has to be atomic.
+cooldown_lock = threading.Lock()
 
 latest = {}  # most recent system snapshot, written by the collector thread
 latest_lock = threading.Lock()
@@ -556,6 +559,49 @@ def test_api(provider, model):
         return {'status': 'error', 'message': str(e)}
 
 
+# ------------------------------------------------------------ cooldowns
+
+def claim_apitest(provider, model):
+    """Reserve the per-model API-test slot, or return the wait message.
+
+    Check-and-set happens under one lock, so two clients clicking at the
+    same moment can't both get through.
+    """
+    with cooldown_lock:
+        now = time.time()
+        wait = APITEST_COOLDOWN - (now - apitest_times.get((provider, model), 0))
+        if wait > 0:
+            return f'Please wait {int(wait) + 1}s before testing {model} again.'
+        apitest_times[(provider, model)] = now
+        return None
+
+
+def claim_speedtest():
+    """Reserve the speed-test slot, or return the rate-limit message.
+
+    Claimed *before* the ~20 s run rather than after it, so a second click
+    while the first test is still running is refused instead of starting a
+    second one.
+    """
+    global last_speedtest_time
+    with cooldown_lock:
+        now = time.time()
+        if last_speedtest_time and now - last_speedtest_time < SPEEDTEST_COOLDOWN:
+            mins = int((SPEEDTEST_COOLDOWN - (now - last_speedtest_time)) // 60) + 1
+            return (f'Rate limited. Try again in {mins} minutes.\n\n'
+                    f'Last result:\n{cached_speedtest_result}')
+        last_speedtest_time = now
+        return None
+
+
+def release_speedtest():
+    """Undo a claim whose run never produced a result, so the next attempt
+    isn't locked out for an hour by a test that never happened."""
+    global last_speedtest_time
+    with cooldown_lock:
+        last_speedtest_time = 0.0
+
+
 # ------------------------------------------------------------ speed test
 
 def do_speedtest():
@@ -577,7 +623,9 @@ def do_speedtest():
 
     cached_speedtest_result = (f"Ping: {ping:.2f} ms\nDownload: {down_mbps:.2f} Mbps\n"
                                f"Upload: {up_mbps:.2f} Mbps\nServer: {server} ({location})")
-    last_speedtest_time = time.time()
+    # Re-stamp: the cooldown runs from when the test finished, not when it started.
+    with cooldown_lock:
+        last_speedtest_time = time.time()
 
     with contextlib.closing(sqlite3.connect(DB_PATH)) as conn:
         conn.execute('INSERT INTO speedtests (download, upload, ping) VALUES (?, ?, ?)',
@@ -786,27 +834,22 @@ def register_node_api():
         except Exception:
             body = {}
         provider, model = str(body.get('provider', '')), str(body.get('model', ''))
-        now = time.time()
-        wait = APITEST_COOLDOWN - (now - apitest_times.get((provider, model), 0))
-        if wait > 0:
-            return {'status': 'error',
-                    'message': f'Please wait {int(wait) + 1}s before testing {model} again.'}
-        apitest_times[(provider, model)] = now
+        wait_msg = claim_apitest(provider, model)
+        if wait_msg:
+            return {'status': 'error', 'message': wait_msg}
         return await run_in_threadpool(test_api, provider, model)
 
     @app.post('/api/speedtest')
     async def api_speedtest(request: Request):
         if not _node_authorized(request):
             return _unauthorized()
-        now = time.time()
-        if last_speedtest_time and now - last_speedtest_time < SPEEDTEST_COOLDOWN:
-            mins = int((SPEEDTEST_COOLDOWN - (now - last_speedtest_time)) // 60) + 1
-            return {'status': 'ratelimited',
-                    'result': f'Rate limited. Try again in {mins} minutes.\n\n'
-                              f'Last result:\n{cached_speedtest_result}'}
+        limited = claim_speedtest()
+        if limited:
+            return {'status': 'ratelimited', 'result': limited}
         try:
             return {'status': 'ok', 'result': await run_in_threadpool(do_speedtest)}
         except Exception as e:
+            release_speedtest()  # the run failed; don't burn the hour
             return {'status': 'error', 'result': f'Speedtest failed: {e}'}
 
 
@@ -1065,14 +1108,11 @@ def main_page():
                     provider, model = provider_select.value, model_select.value
                     if is_local(server):
                         # Remote runs are rate-limited by the node itself.
-                        now = time.time()
-                        wait = APITEST_COOLDOWN - (now - apitest_times.get((provider, model), 0))
-                        if wait > 0:
+                        wait_msg = claim_apitest(provider, model)
+                        if wait_msg:
                             api_result.classes(replace='text-sm text-orange-400 whitespace-pre-wrap')
-                            api_result.set_text(
-                                f'Please wait {int(wait) + 1}s before testing {model} again.')
+                            api_result.set_text(wait_msg)
                             return
-                        apitest_times[(provider, model)] = now
                     api_btn.disable()
                     api_result.classes(replace='text-sm text-gray-400 whitespace-pre-wrap')
                     api_result.set_text(f"Testing {provider} / {model} on {server['name']}...")
@@ -1106,12 +1146,9 @@ def main_page():
                     server = current_server()
                     if is_local(server):
                         # Remote runs are rate-limited by the node itself.
-                        now = time.time()
-                        if last_speedtest_time and now - last_speedtest_time < SPEEDTEST_COOLDOWN:
-                            mins = int((SPEEDTEST_COOLDOWN - (now - last_speedtest_time)) // 60) + 1
-                            speed_result.set_text(
-                                f'Rate limited. Try again in {mins} minutes.\n\n'
-                                f'Last result:\n{cached_speedtest_result}')
+                        limited = claim_speedtest()
+                        if limited:
+                            speed_result.set_text(limited)
                             return
                     speed_btn.disable()
                     speed_result.set_text(
@@ -1122,6 +1159,8 @@ def main_page():
                         else:
                             speed_result.set_text(await run.io_bound(remote_speedtest, server))
                     except Exception as e:
+                        if is_local(server):
+                            release_speedtest()  # the run failed; don't burn the hour
                         speed_result.set_text(f'Speedtest failed: {e}')
                     finally:
                         speed_btn.enable()
