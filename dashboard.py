@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """AI agents status dashboard.
 
-NiceGUI rewrite. Runs as root and aggregates agent data (cron jobs,
-memories, issues, auth profiles) from multiple user accounts. Data is
-currently read from each user's openclaw workspace.
+NiceGUI rewrite. Monitors this server and any number of remote ones. A
+'hub' serves the dashboard UI; a 'node' is the same file running headless
+on a monitored server, exposing a token-protected JSON API the hub pulls
+from. Agent data (cron jobs, memories, issues, auth profiles, model
+config) is read from each configured user's openclaw workspace.
 """
 
 import hashlib
@@ -12,24 +14,38 @@ import json
 import os
 import secrets
 import shutil
+import socket
 import sqlite3
 import subprocess
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
-from fastapi.responses import RedirectResponse
+from fastapi import Request
+from fastapi.concurrency import run_in_threadpool
+from fastapi.responses import JSONResponse, RedirectResponse
 from nicegui import app, run, ui
 
 # Users whose agent workspaces are aggregated (cron jobs, memories, issues).
 AGENT_USERS = os.environ.get('DASHBOARD_USERS', 'hermes,openclaw').split(',')
 
+# Deployment mode. 'hub' serves the dashboard UI and pulls from registered
+# servers; 'node' is headless — collector plus the JSON API only.
+MODE = os.environ.get('DASHBOARD_MODE', 'hub').strip().lower()
+# Shared secret a hub presents to read this server's API. Required in node
+# mode; setting it in hub mode also exposes the API, so one hub can be
+# monitored by another.
+NODE_TOKEN = os.environ.get('DASHBOARD_NODE_TOKEN', '').strip()
+NODE_NAME = os.environ.get('DASHBOARD_NODE_NAME', '').strip() or socket.gethostname()
+
 PORT = int(os.environ.get('DASHBOARD_PORT', '8080'))
 DATA_DIR = os.environ.get('DASHBOARD_DATA_DIR', '/var/lib/ai-agents-dashboard')
 DB_PATH = os.path.join(DATA_DIR, 'dashboard.db')
+SERVERS_PATH = os.path.join(DATA_DIR, 'servers.json')
 SPEEDTEST_BIN = os.environ.get('SPEEDTEST_BIN', 'speedtest-ookla')
 # Candidate filenames (in order) for an agent's model/profile config, tried both
 # directly under the agent dir and under its 'agent/' subdir. Override with
@@ -51,6 +67,8 @@ APITEST_COOLDOWN = 30  # seconds between tests per model
 SPEEDTEST_COOLDOWN = 3600  # seconds between speed tests
 COLLECT_INTERVAL = 15  # seconds between metric samples
 DISPLAY_POINTS = 720  # 3 hours of 15s samples shown on charts
+REMOTE_TIMEOUT = 4  # seconds for a hub -> node data call
+REMOTE_ACTION_TIMEOUT = 90  # seconds for a hub -> node action (API / speed test)
 
 MODEL_OPTIONS = {
     'anthropic': ['claude-sonnet-4-6', 'claude-haiku-4-5-20251001', 'claude-opus-4-6'],
@@ -258,10 +276,10 @@ def collector():
 
 # -------------------------------------------------- multi-user agent data
 
-def get_cron_jobs():
-    """Enabled cron jobs across all configured agent users."""
+def get_cron_jobs(users=None):
+    """Enabled cron jobs across the given agent users (default: AGENT_USERS)."""
     jobs = []
-    for user in AGENT_USERS:
+    for user in (AGENT_USERS if users is None else users):
         path = user_path(user, 'cron', 'jobs.json')
         try:
             with open(path) as f:
@@ -284,11 +302,11 @@ def get_cron_jobs():
     return jobs
 
 
-def get_memories():
+def get_memories(users=None):
     """Last 5 memory entries of today per agent user."""
     memories = {}
     today = datetime.now(LOCAL_TZ).strftime('%Y-%m-%d')
-    for user in AGENT_USERS:
+    for user in (AGENT_USERS if users is None else users):
         path = user_path(user, 'workspace', 'memory', f'{today}.md')
         try:
             with open(path) as f:
@@ -299,10 +317,10 @@ def get_memories():
     return memories
 
 
-def get_issues():
-    """Active and resolved issues across all agent users, tagged by user."""
+def get_issues(users=None):
+    """Active and resolved issues across the given agent users, tagged by user."""
     issues = {'active': [], 'fixed': []}
-    for user in AGENT_USERS:
+    for user in (AGENT_USERS if users is None else users):
         path = user_path(user, 'workspace', 'ISSUES.md')
         try:
             with open(path) as f:
@@ -400,8 +418,8 @@ def _load_profiles(cfg):
     return [_parse_profile(name, pcfg) for name, pcfg in profiles.items()]
 
 
-def get_model_config():
-    """Model assignments for every agent of every user.
+def get_model_config(users=None):
+    """Model assignments for every agent of every given user.
 
     Returns [{'user', 'agent', 'profiles': [...]}], one entry per agent that has
     a readable config. Each agent's config is the first match from
@@ -409,7 +427,7 @@ def get_model_config():
     (mirroring where auth-profiles.json lives).
     """
     result = []
-    for user in AGENT_USERS:
+    for user in (AGENT_USERS if users is None else users):
         agents_dir = user_path(user, 'agents')
         try:
             agents = sorted(a for a in os.listdir(agents_dir)
@@ -544,6 +562,230 @@ def do_speedtest():
     return cached_speedtest_result
 
 
+# ------------------------------------------------------- server registry
+
+LOCAL_SERVER = 'local'  # reserved name for the machine the hub runs on
+
+
+def load_servers():
+    """Registered servers from servers.json. Never raises — a broken file
+    degrades to local-only monitoring rather than taking the page down."""
+    try:
+        with open(SERVERS_PATH) as f:
+            data = json.load(f)
+        raw = data.get('servers', [])
+        if not isinstance(raw, list):
+            raise ValueError('"servers" must be a list')
+    except FileNotFoundError:
+        return []
+    except Exception as e:
+        print(f'servers.json unusable ({e}) — monitoring the local server only')
+        return []
+    servers = []
+    for s in raw:
+        if isinstance(s, dict) and s.get('name'):
+            servers.append({
+                'name': str(s['name']),
+                'url': str(s.get('url', '')).rstrip('/'),
+                'token': str(s.get('token', '')),
+                'agents': [u for u in (str(a).strip() for a in s.get('agents') or []) if u],
+            })
+    return servers
+
+
+def save_servers(servers):
+    """Persist the registry with 0600 — it holds node tokens."""
+    os.makedirs(DATA_DIR, exist_ok=True)
+    fd = os.open(SERVERS_PATH, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, 'w') as f:
+        json.dump({'servers': servers}, f, indent=2)
+
+
+def all_servers():
+    """Local server first, then every registered remote.
+
+    'local' is implicit: it needs no entry in servers.json, but storing one
+    lets the UI override which agent users it monitors (DASHBOARD_USERS is
+    only the default).
+    """
+    stored = load_servers()
+    local = next((s for s in stored if s['name'] == LOCAL_SERVER), None)
+    return [{'name': LOCAL_SERVER, 'url': '', 'token': '',
+             'agents': (local['agents'] if local else None) or list(AGENT_USERS)}] \
+        + [s for s in stored if s['name'] != LOCAL_SERVER]
+
+
+def get_server(name):
+    """Look up a server by name; unknown names fall back to local."""
+    servers = all_servers()
+    return next((s for s in servers if s['name'] == name), servers[0])
+
+
+# ------------------------------------------------------------ data sources
+
+def is_local(server):
+    return server['name'] == LOCAL_SERVER
+
+
+def _node_request(server, path, payload=None, params=None, timeout=REMOTE_TIMEOUT):
+    """Call a node's JSON API. Raises on transport, HTTP, or auth failure."""
+    url = server['url'] + path
+    if params:
+        url += '?' + urllib.parse.urlencode(params)
+    headers = {'Authorization': f"Bearer {server['token']}"}
+    data = None
+    if payload is not None:
+        data = json.dumps(payload).encode()
+        headers['Content-Type'] = 'application/json'
+    req = urllib.request.Request(url, data=data, headers=headers)
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return json.loads(resp.read())
+
+
+def source_problem(server):
+    """How to label a failed read, so a local fault isn't blamed on the network."""
+    return 'local read failed' if is_local(server) else 'node unreachable'
+
+
+def source_snapshot(server):
+    """Latest system snapshot for a server. Blocking for remotes."""
+    if is_local(server):
+        with latest_lock:
+            return dict(latest)
+    return _node_request(server, '/api/snapshot')
+
+
+def source_history(server, limit=DISPLAY_POINTS):
+    """Chart history for a server, in fetch_history()'s shape."""
+    if is_local(server):
+        return fetch_history(limit)
+    return _node_request(server, '/api/history', params={'limit': limit})
+
+
+def source_stats(server):
+    """(snapshot, history) — one blocking call for the stats timer."""
+    return source_snapshot(server), source_history(server)
+
+
+def source_agentdata(server):
+    """Cron jobs, memories, issues, and model config for a server's agents."""
+    users = server['agents']
+    if is_local(server):
+        return {'cron': get_cron_jobs(users), 'memories': get_memories(users),
+                'issues': get_issues(users), 'models': get_model_config(users)}
+    # The hub decides which users to monitor; the node reads only those.
+    return _node_request(server, '/api/agentdata', params={'users': ','.join(users)})
+
+
+def remote_apitest(server, provider, model):
+    """Run the API probe on a remote node — its keys, its cooldown."""
+    try:
+        return _node_request(server, '/api/apitest',
+                             payload={'provider': provider, 'model': model},
+                             timeout=REMOTE_ACTION_TIMEOUT)
+    except Exception as e:
+        return {'status': 'error', 'message': f'node unreachable: {e}'}
+
+
+def remote_speedtest(server):
+    """Run the speed test on a remote node; returns text ready to display."""
+    try:
+        res = _node_request(server, '/api/speedtest', payload={},
+                            timeout=REMOTE_ACTION_TIMEOUT)
+        return res.get('result') or 'No result.'
+    except Exception as e:
+        return f'node unreachable: {e}'
+
+
+# --------------------------------------------------------------- node API
+
+def _node_authorized(request):
+    """Constant-time Bearer check against DASHBOARD_NODE_TOKEN."""
+    scheme, _, token = request.headers.get('authorization', '').partition(' ')
+    return (bool(NODE_TOKEN) and scheme.lower() == 'bearer'
+            and hmac.compare_digest(token.strip(), NODE_TOKEN))
+
+
+def _unauthorized():
+    return JSONResponse({'error': 'unauthorized'}, status_code=401)
+
+
+def _users_param(raw):
+    """Parse a 'users' query value; None means 'this server's own list'."""
+    users = [u.strip() for u in (raw or '').split(',') if u.strip()]
+    return users or None
+
+
+def register_node_api():
+    """Token-protected JSON API a hub pulls from.
+
+    Registered whenever DASHBOARD_NODE_TOKEN is set, so a hub can be
+    monitored by another hub as well.
+    """
+
+    @app.get('/api/ping')
+    def api_ping(request: Request):
+        """Cheap reachability + auth check used by the add-server dialog."""
+        if not _node_authorized(request):
+            return _unauthorized()
+        return {'ok': True, 'mode': MODE, 'name': NODE_NAME,
+                'agents': all_servers()[0]['agents']}
+
+    @app.get('/api/snapshot')
+    def api_snapshot(request: Request):
+        if not _node_authorized(request):
+            return _unauthorized()
+        with latest_lock:
+            return dict(latest)
+
+    @app.get('/api/history')
+    def api_history(request: Request, limit: int = DISPLAY_POINTS):
+        if not _node_authorized(request):
+            return _unauthorized()
+        return fetch_history(max(1, min(limit, 5000)))
+
+    @app.get('/api/agentdata')
+    def api_agentdata(request: Request, users: str = ''):
+        if not _node_authorized(request):
+            return _unauthorized()
+        who = _users_param(users)
+        return {'cron': get_cron_jobs(who), 'memories': get_memories(who),
+                'issues': get_issues(who), 'models': get_model_config(who)}
+
+    @app.post('/api/apitest')
+    async def api_apitest(request: Request):
+        """Blocking probe, so it runs in a worker thread, not the event loop."""
+        if not _node_authorized(request):
+            return _unauthorized()
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        provider, model = str(body.get('provider', '')), str(body.get('model', ''))
+        now = time.time()
+        wait = APITEST_COOLDOWN - (now - apitest_times.get((provider, model), 0))
+        if wait > 0:
+            return {'status': 'error',
+                    'message': f'Please wait {int(wait) + 1}s before testing {model} again.'}
+        apitest_times[(provider, model)] = now
+        return await run_in_threadpool(test_api, provider, model)
+
+    @app.post('/api/speedtest')
+    async def api_speedtest(request: Request):
+        if not _node_authorized(request):
+            return _unauthorized()
+        now = time.time()
+        if last_speedtest_time and now - last_speedtest_time < SPEEDTEST_COOLDOWN:
+            mins = int((SPEEDTEST_COOLDOWN - (now - last_speedtest_time)) // 60) + 1
+            return {'status': 'ratelimited',
+                    'result': f'Rate limited. Try again in {mins} minutes.\n\n'
+                              f'Last result:\n{cached_speedtest_result}'}
+        try:
+            return {'status': 'ok', 'result': await run_in_threadpool(do_speedtest)}
+        except Exception as e:
+            return {'status': 'error', 'result': f'Speedtest failed: {e}'}
+
+
 # ------------------------------------------------------------------ UI
 
 AXIS_STYLE = {'axisLabel': {'color': '#888'}, 'splitLine': {'lineStyle': {'color': '#444'}}}
@@ -590,7 +832,129 @@ def section_card(title):
     return card
 
 
-@ui.page('/login')
+def servers_dialog(on_saved):
+    """Popup for registering, editing, and removing monitored servers.
+
+    Adding walks the user through the info needed to reach the server, then
+    asks whether it runs AI agents and collects their usernames if so. The
+    entry is only persisted once the node answers /api/ping with its token.
+    `on_saved` (async) runs after every change so the page can pick it up.
+    """
+    dialog = ui.dialog()
+    with dialog, ui.card().classes('bg-[#2d2d2d] border border-[#444] w-[46rem] max-w-full'):
+        ui.label('Manage servers').classes('text-lg font-bold text-[#ff9900]')
+        listing = ui.column().classes('w-full gap-2')
+
+        ui.separator()
+        ui.label('Add a server').classes('text-sm font-bold text-[#ff9900]')
+        with ui.row().classes('w-full gap-2 no-wrap'):
+            name_in = ui.input('Name', placeholder='web-1').props('dark dense outlined').classes('flex-1')
+            url_in = ui.input('Base URL', placeholder='http://10.0.0.5:8080') \
+                .props('dark dense outlined').classes('flex-[2]')
+        token_in = ui.input('Node token — DASHBOARD_NODE_TOKEN on that server', password=True) \
+            .props('dark dense outlined').classes('w-full')
+        agents_sw = ui.switch('This server runs AI agents to monitor (Hermes / Openclaw)')
+        users_in = ui.input('Agent users, comma-separated', placeholder='hermes') \
+            .props('dark dense outlined').classes('w-full')
+        users_in.bind_visibility_from(agents_sw, 'value')
+        feedback = ui.label('').classes('text-sm text-red-400 whitespace-pre-wrap')
+        with ui.row().classes('w-full justify-end gap-2'):
+            ui.button('Close', on_click=dialog.close).props('flat color=grey')
+            add_btn = ui.button('Validate & add').props('color=orange')
+
+    def fail(message):
+        feedback.classes(replace='text-sm text-red-400 whitespace-pre-wrap')
+        feedback.set_text(message)
+
+    def parse_users(raw):
+        return [u.strip() for u in (raw or '').split(',') if u.strip()]
+
+    async def save_agents(name, raw):
+        """Add or remove the agent users monitored on an already-known server."""
+        stored = load_servers()
+        entry = next((s for s in stored if s['name'] == name), None)
+        if entry is None:
+            # 'local' has no stored entry until its agent list is overridden.
+            stored.append({'name': name, 'url': '', 'token': '', 'agents': parse_users(raw)})
+        else:
+            entry['agents'] = parse_users(raw)
+        save_servers(stored)
+        render_listing()
+        ui.notify(f'Updated the agents monitored on {name}', color='orange')
+        await on_saved()
+
+    async def delete_server(name):
+        confirm = ui.dialog()
+        with confirm, ui.card().classes('bg-[#2d2d2d] border border-[#444]'):
+            ui.label(f'Stop monitoring "{name}"?').classes('text-sm text-white')
+            with ui.row().classes('w-full justify-end gap-2'):
+                ui.button('Cancel', on_click=lambda: confirm.submit(False)).props('flat color=grey')
+                ui.button('Remove', on_click=lambda: confirm.submit(True)).props('color=red')
+        if await confirm:
+            save_servers([s for s in load_servers() if s['name'] != name])
+            render_listing()
+            ui.notify(f'Removed {name}', color='orange')
+            await on_saved()
+
+    def render_listing():
+        listing.clear()
+        with listing:
+            ui.label('Monitored servers').classes('text-sm font-bold text-[#ff9900]')
+            for s in all_servers():
+                with ui.row().classes('w-full items-center gap-2 no-wrap'):
+                    ui.label(s['name']).classes('text-sm font-bold text-white w-24 shrink-0')
+                    ui.label(s['url'] or 'this machine').classes('text-xs text-gray-400 flex-1')
+                    field = ui.input(value=', '.join(s['agents']), placeholder='no AI agents') \
+                        .props('dark dense outlined').classes('w-52')
+                    ui.button(icon='save',
+                              on_click=lambda n=s['name'], f=field: save_agents(n, f.value)) \
+                        .props('flat dense color=orange').tooltip('Save agent users')
+                    if s['name'] != LOCAL_SERVER:
+                        ui.button(icon='delete', on_click=lambda n=s['name']: delete_server(n)) \
+                            .props('flat dense color=red').tooltip('Stop monitoring')
+
+    async def add_server():
+        name = (name_in.value or '').strip()
+        url = (url_in.value or '').strip().rstrip('/')
+        token = (token_in.value or '').strip()
+        users = parse_users(users_in.value) if agents_sw.value else []
+
+        if not name or not url or not token:
+            return fail('Name, base URL and node token are all required.')
+        if name in {s['name'] for s in all_servers()}:
+            return fail(f'A server named "{name}" is already registered.')
+        if not url.startswith(('http://', 'https://')):
+            return fail('Base URL must start with http:// or https://')
+        if agents_sw.value and not users:
+            return fail('Name at least one agent user, or turn the AI-agents switch off.')
+
+        candidate = {'name': name, 'url': url, 'token': token, 'agents': users}
+        add_btn.disable()
+        feedback.classes(replace='text-sm text-gray-400 whitespace-pre-wrap')
+        feedback.set_text(f'Contacting {url} ...')
+        try:
+            res = await run.io_bound(_node_request, candidate, '/api/ping')
+        except Exception as e:
+            return fail(f'Could not reach that server: {e}')
+        finally:
+            add_btn.enable()
+        if not (isinstance(res, dict) and res.get('ok')):
+            return fail('That URL answered, but not like a dashboard node.')
+
+        save_servers(load_servers() + [candidate])
+        for field in (name_in, url_in, token_in, users_in):
+            field.set_value('')
+        agents_sw.set_value(False)
+        feedback.set_text('')
+        render_listing()
+        ui.notify(f'Now monitoring {name}', color='positive')
+        await on_saved()
+
+    add_btn.on_click(add_server)
+    render_listing()
+    return dialog
+
+
 def login_page():
     """Password prompt; on success marks the browser session as authenticated."""
     if app.storage.user.get('authenticated', False):
@@ -615,18 +979,31 @@ def login_page():
             error = ui.label('').classes('text-red-400 text-center')
 
 
-@ui.page('/')
 def main_page():
-    """The dashboard itself. Built per connected client; two timers keep it
-    live — system stats/charts every 15s, agent data every 60s."""
+    """The dashboard. Built per connected client; two timers keep it live —
+    system stats/charts every 15s, agent data every 60s.
+
+    Every panel reads through the data-source seam, so a remote server
+    renders exactly like the local one, and only the panels that apply to
+    the selected server are shown.
+    """
     if not app.storage.user.get('authenticated', False):
         return RedirectResponse('/login')
 
     ui.query('body').classes('bg-[#1e1e1e] font-mono')
     ui.colors(primary='#ff9900')
 
+    def current_server():
+        return get_server(app.storage.user.get('server', LOCAL_SERVER))
+
     with ui.column().classes('w-full max-w-screen-xl mx-auto p-4 gap-4'):
-        ui.label('Foxy Server Monitor v3').classes('text-2xl font-bold text-[#ff9900]')
+        with ui.row().classes('w-full items-center gap-3 no-wrap'):
+            ui.label('Foxy Server Monitor v3').classes('text-2xl font-bold text-[#ff9900]')
+            ui.space()
+            server_select = ui.select([LOCAL_SERVER], value=LOCAL_SERVER, label='Server') \
+                .props('dark dense outlined').classes('w-56')
+            manage_btn = ui.button(icon='settings').props('flat color=orange') \
+                .tooltip('Add or edit monitored servers')
         last_refresh = ui.label('Live updating every 15s.').classes('text-xs text-gray-500')
 
         with section_card('Live Resource Usage (CPU & RAM)'):
@@ -660,19 +1037,26 @@ def main_page():
                 provider_select.on_value_change(on_provider_change)
 
                 async def run_api_test():
+                    server = current_server()
                     provider, model = provider_select.value, model_select.value
-                    now = time.time()
-                    wait = APITEST_COOLDOWN - (now - apitest_times.get((provider, model), 0))
-                    if wait > 0:
-                        api_result.classes(replace='text-sm text-orange-400 whitespace-pre-wrap')
-                        api_result.set_text(f'Please wait {int(wait) + 1}s before testing {model} again.')
-                        return
-                    apitest_times[(provider, model)] = now
+                    if is_local(server):
+                        # Remote runs are rate-limited by the node itself.
+                        now = time.time()
+                        wait = APITEST_COOLDOWN - (now - apitest_times.get((provider, model), 0))
+                        if wait > 0:
+                            api_result.classes(replace='text-sm text-orange-400 whitespace-pre-wrap')
+                            api_result.set_text(
+                                f'Please wait {int(wait) + 1}s before testing {model} again.')
+                            return
+                        apitest_times[(provider, model)] = now
                     api_btn.disable()
                     api_result.classes(replace='text-sm text-gray-400 whitespace-pre-wrap')
-                    api_result.set_text(f'Testing {provider} / {model}...')
+                    api_result.set_text(f"Testing {provider} / {model} on {server['name']}...")
                     try:
-                        res = await run.io_bound(test_api, provider, model)
+                        if is_local(server):
+                            res = await run.io_bound(test_api, provider, model)
+                        else:
+                            res = await run.io_bound(remote_apitest, server, provider, model)
                     finally:
                         api_btn.enable()
                     if res['status'] == 'ok':
@@ -695,16 +1079,24 @@ def main_page():
                     'text-sm text-gray-400 whitespace-pre-wrap')
 
                 async def run_speed_test():
-                    now = time.time()
-                    if last_speedtest_time and now - last_speedtest_time < SPEEDTEST_COOLDOWN:
-                        mins = int((SPEEDTEST_COOLDOWN - (now - last_speedtest_time)) // 60) + 1
-                        speed_result.set_text(
-                            f'Rate limited. Try again in {mins} minutes.\n\nLast result:\n{cached_speedtest_result}')
-                        return
+                    server = current_server()
+                    if is_local(server):
+                        # Remote runs are rate-limited by the node itself.
+                        now = time.time()
+                        if last_speedtest_time and now - last_speedtest_time < SPEEDTEST_COOLDOWN:
+                            mins = int((SPEEDTEST_COOLDOWN - (now - last_speedtest_time)) // 60) + 1
+                            speed_result.set_text(
+                                f'Rate limited. Try again in {mins} minutes.\n\n'
+                                f'Last result:\n{cached_speedtest_result}')
+                            return
                     speed_btn.disable()
-                    speed_result.set_text('Running speed test... (this takes ~20 seconds)')
+                    speed_result.set_text(
+                        f"Running speed test on {server['name']}... (this takes ~20 seconds)")
                     try:
-                        speed_result.set_text(await run.io_bound(do_speedtest))
+                        if is_local(server):
+                            speed_result.set_text(await run.io_bound(do_speedtest))
+                        else:
+                            speed_result.set_text(await run.io_bound(remote_speedtest, server))
                     except Exception as e:
                         speed_result.set_text(f'Speedtest failed: {e}')
                     finally:
@@ -717,7 +1109,10 @@ def main_page():
             with section_card('Security & Logins').classes('flex-1'):
                 sec_label = ui.label('Loading...').classes('text-xs text-green-400 whitespace-pre font-mono')
 
-        with section_card('Active Cron Jobs (all users)'):
+        # The agent panels below only apply to servers that run AI agents;
+        # apply_visibility() hides them for plain servers.
+        cron_card = section_card('Active Cron Jobs (all agents)')
+        with cron_card:
             cron_table = ui.table(
                 columns=[
                     {'name': 'user', 'label': 'User', 'field': 'user', 'align': 'left'},
@@ -729,22 +1124,44 @@ def main_page():
                 rows=[],
             ).classes('w-full bg-transparent text-white').props('dark flat dense')
 
-        with section_card('Model Configuration — All Profiles'):
+        models_card = section_card('Model Configuration — All Profiles')
+        with models_card:
             model_config_box = ui.column().classes('w-full gap-4')
 
-        with section_card('Recent Memories (Last 5 per user)'):
+        memories_card = section_card('Recent Memories (Last 5 per user)')
+        with memories_card:
             memories_box = ui.column().classes('w-full gap-2')
 
-        with ui.row().classes('w-full items-stretch gap-4 no-wrap'):
+        issues_row = ui.row().classes('w-full items-stretch gap-4 no-wrap')
+        with issues_row:
             with section_card('Current Issues').classes('flex-1'):
                 active_issues_box = ui.column().classes('w-full gap-1')
             with section_card('Issues Fixed').classes('flex-1'):
                 fixed_issues_box = ui.column().classes('w-full gap-1')
 
-    def refresh_stats():
-        """Update text metrics from the collector's snapshot and redraw charts from the DB."""
-        with latest_lock:
-            data = dict(latest)
+    def clear_charts():
+        set_chart_data(resource_chart, [], [], [])
+        set_chart_data(ping_chart, [], [], [], [])
+        set_chart_data(net_chart, [], [], [])
+
+    async def refresh_stats():
+        """Redraw the system panels from the selected server's source.
+
+        Remote sources are blocking HTTP, so the fetch goes through
+        run.io_bound and a dead node degrades to an inline error.
+        """
+        server = current_server()
+        try:
+            data, h = await run.io_bound(source_stats, server)
+        except Exception as e:
+            last_refresh.classes(replace='text-xs text-red-400')
+            last_refresh.set_text(f"{server['name']}: {source_problem(server)} — {e}")
+            for label in (ram_label, disk_label, net_label, ping_label, top_label, sec_label):
+                label.set_text('—')
+            clear_charts()
+            return
+
+        last_refresh.classes(replace='text-xs text-gray-500')
         if data:
             ram_label.set_text(data.get('ram', 'Error'))
             disk_label.set_text(data.get('disk', 'Error'))
@@ -753,9 +1170,9 @@ def main_page():
             top_label.set_text(data.get('top_apps', ''))
             sec_label.set_text(data.get('security', ''))
         last_refresh.set_text(
-            f"Live updating every 15s. Last refresh: {datetime.now(LOCAL_TZ).strftime('%H:%M:%S')}")
+            f"{server['name']} — live every 15s. "
+            f"Last refresh: {datetime.now(LOCAL_TZ).strftime('%H:%M:%S')}")
 
-        h = fetch_history()
         set_chart_data(resource_chart, h['labels'], h['cpu'], h['ram'])
         set_chart_data(ping_chart, h['labels'], h['ping'], h['jitter'], h['loss'])
         set_chart_data(net_chart, h['labels'], h['rx'], h['tx'])
@@ -771,10 +1188,9 @@ def main_page():
                     ui.label(f"[{item['user']}]").classes('text-xs text-[#ff9900]')
                     ui.label(item['text']).classes('text-sm text-white')
 
-    def render_model_config():
+    def render_model_config(agents):
         """One table of profile → model assignments per agent, grouped by user."""
         model_config_box.clear()
-        agents = get_model_config()
         with model_config_box:
             if not agents:
                 ui.label('No model configuration found.').classes('text-sm text-gray-500')
@@ -805,26 +1221,85 @@ def main_page():
                     rows=rows,
                 ).classes('w-full bg-transparent text-white').props('dark flat dense')
 
-    def refresh_meta():
-        """Re-read cron jobs, model config, memories, and issues from every user's workspace."""
-        cron_table.rows = get_cron_jobs()
+    def apply_visibility(server):
+        """Agent panels only make sense for servers that run AI agents."""
+        has_agents = bool(server['agents'])
+        for card in (cron_card, models_card, memories_card, issues_row):
+            card.set_visibility(has_agents)
+
+    def agent_error(message):
+        cron_table.rows = []
+        cron_table.update()
+        for box in (model_config_box, memories_box, active_issues_box, fixed_issues_box):
+            box.clear()
+            with box:
+                ui.label(message).classes('text-sm text-red-400')
+
+    async def refresh_meta():
+        """Re-read cron jobs, model config, memories, and issues for the
+        selected server's agent users."""
+        server = current_server()
+        apply_visibility(server)
+        if not server['agents']:
+            return
+        try:
+            data = await run.io_bound(source_agentdata, server)
+        except Exception as e:
+            agent_error(f'{source_problem(server)} — {e}')
+            return
+
+        cron_table.rows = data.get('cron', [])
         cron_table.update()
 
-        render_model_config()
+        render_model_config(data.get('models', []))
 
         memories_box.clear()
         with memories_box:
-            for user, lines in get_memories().items():
+            for user, lines in (data.get('memories') or {}).items():
                 ui.label(user).classes('text-sm font-bold text-[#ff9900]')
                 for line in lines:
                     ui.label(line).classes('text-sm text-white ml-4')
 
-        issues = get_issues()
-        issue_row(active_issues_box, issues['active'])
-        issue_row(fixed_issues_box, issues['fixed'])
+        issues = data.get('issues') or {}
+        issue_row(active_issues_box, issues.get('active', []))
+        issue_row(fixed_issues_box, issues.get('fixed', []))
+
+    async def refresh_all():
+        await refresh_stats()
+        await refresh_meta()
+
+    def sync_server_options():
+        """Rebuild the selector from the registry, keeping the current pick."""
+        names = [s['name'] for s in all_servers()]
+        chosen = app.storage.user.get('server', LOCAL_SERVER)
+        if chosen not in names:
+            chosen = LOCAL_SERVER
+            app.storage.user['server'] = chosen
+        server_select.set_options(names, value=chosen)
+
+    async def on_server_change():
+        app.storage.user['server'] = server_select.value or LOCAL_SERVER
+        await refresh_all()
+
+    async def on_registry_change():
+        sync_server_options()
+        await refresh_all()
+
+    sync_server_options()
+    server_select.on_value_change(on_server_change)
+    manage_btn.on_click(servers_dialog(on_registry_change).open)
+    apply_visibility(current_server())
 
     ui.timer(COLLECT_INTERVAL, refresh_stats)
     ui.timer(60, refresh_meta)
+    ui.timer(0.1, refresh_all, once=True)  # don't leave the page blank until the first tick
+
+
+# A node is headless: it serves the JSON API only, so the pages are
+# registered explicitly here rather than with @ui.page decorators.
+if MODE != 'node':
+    ui.page('/login')(login_page)
+    ui.page('/')(main_page)
 
 
 # ------------------------------------------------------------------ main
@@ -880,8 +1355,16 @@ def load_storage_secret():
 
 # NiceGUI may re-import this module in a child process, hence the '__mp_main__' guard.
 if __name__ in {'__main__', '__mp_main__'}:
+    if MODE not in {'hub', 'node'}:
+        raise SystemExit(f"DASHBOARD_MODE must be 'hub' or 'node', not '{MODE}'")
+    if MODE == 'node' and not NODE_TOKEN:
+        raise SystemExit('DASHBOARD_MODE=node requires DASHBOARD_NODE_TOKEN '
+                         '(the shared secret the hub presents).')
     init_db()
-    PASSWORD_HASH = load_password_hash()
+    if MODE == 'hub':
+        PASSWORD_HASH = load_password_hash()
+    if NODE_TOKEN:
+        register_node_api()
     app.on_startup(lambda: threading.Thread(target=collector, daemon=True).start())
     ui.run(
         host='0.0.0.0',
