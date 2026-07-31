@@ -4,10 +4,12 @@ A self-hosted server monitoring dashboard for servers running [openclaw](https:/
 
 ![Dashboard](https://img.shields.io/badge/python-3.10%2B-blue) ![License](https://img.shields.io/badge/license-MIT-green)
 
+> **Working on this repo (human or AI agent)?** Read [CLAUDE.md](CLAUDE.md) first — function-level code map, threading model, and conventions — so you can jump straight to the right part of `dashboard.py` instead of reading all ~700 lines. The task queue and the multi-server feature spec are in [NEXT_STEPS.md](NEXT_STEPS.md).
+
 ## Features
 
 - **Live system stats** — CPU, RAM, disk, network throughput, ping/jitter/packet loss
-- **Historical charts** — 3-hour rolling window, 24-hour retention in SQLite (ECharts)
+- **Historical charts** — rolling window of the last 720 samples (~3 h), 24-hour retention in SQLite (ECharts)
 - **Multi-user openclaw integration** — displays active cron jobs, agent memories, and issues from every configured user (default: `hermes` and `openclaw`), each entry tagged with its owner
 - **API health test** — test Anthropic, Google, and Moonshot/Kimi keys directly from the dashboard with latency measurement (keys are discovered across all configured users' auth profiles)
 - **Internet speed test** — powered by Ookla speedtest CLI, rate-limited to once per hour
@@ -83,7 +85,7 @@ The dashboard will be available at `http://localhost:8080`.
 
 ## Configuration
 
-All configuration is via environment variables:
+All configuration is via environment variables ([`.env.example`](.env.example) lists them all). The app reads real environment variables — it does **not** auto-load a `.env` file; set them in the shell or as `Environment=` lines in the systemd unit:
 
 | Variable | Default | Description |
 |---|---|---|
@@ -105,6 +107,33 @@ All configuration is via environment variables:
 6. Active Cron Jobs (all users)
 7. Recent Memories (per user)
 8. Active & Resolved Issues (tagged by user)
+
+## Roadmap — multi-server monitoring (planned, not implemented yet)
+
+The next milestone turns this into a hub that monitors **many** servers — servers running AI agents and plain servers alike: a server selector on the main page, a headless "agent mode" of the same `dashboard.py` exposing a token-protected JSON API, and a popup dialog to register new servers and AI agents from the UI (no CLI). The full spec with acceptance criteria is [NEXT_STEPS.md](NEXT_STEPS.md) section F1; implementation is assigned to the next agent.
+
+## Architecture (for contributors & AI agents)
+
+Everything lives in one file, [`dashboard.py`](dashboard.py) (~700 lines), organized in sections marked with `# ---------------- <name>` comments: env config → `database` → `metric collector` (daemon thread, 15 s sampling) → `multi-user openclaw data` → `API test` → `speed test` → `UI` (NiceGUI pages) → `main`.
+
+**Read [CLAUDE.md](CLAUDE.md) before touching the code** — it has the function-level code map, threading model, conventions, and gotchas, so you can grep straight to the right section instead of reading the whole file.
+
+## Development
+
+```bash
+pip install -r requirements.txt
+python3 -m py_compile dashboard.py   # syntax check — there is no test suite
+# Run locally without root (uses your own ~/.openclaw if present):
+DASHBOARD_DATA_DIR=./data DASHBOARD_USERS=$USER python3 dashboard.py
+```
+
+Conventions: single file, plain functions, env-var config (`DASHBOARD_*`, read once at import time). New config needs a default at the top of `dashboard.py`, a row in the table above, and a line in `.env.example`.
+
+## Security notes
+
+- **Always set `DASHBOARD_PASSWORD_HASH`.** The source ships a default hash, so an unconfigured deployment has a known password (fix pending — see NEXT_STEPS.md P1).
+- The dashboard serves plain HTTP on `0.0.0.0`. Put it behind a TLS reverse proxy (nginx/caddy) or keep it on a private interface/VPN before exposing it.
+- It runs as **root** and reads every configured user's `~/.openclaw`, including `auth-profiles.json` (API keys) for the API test panel. Only configure users whose data the dashboard operator may see.
 
 ## Notes
 
