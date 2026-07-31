@@ -25,7 +25,7 @@ Produced 2026-07-31 from a full code review of `dashboard.py` plus the owner's f
 - [x] F1.6 Remote actions (API test, speed test)
 - [x] F1.7 Documentation update
 - [x] P2.1 Configurable network interface
-- [ ] P2.2 Safe SQLite handling (close + WAL)
+- [x] P2.2 Safe SQLite handling (close + WAL)
 - [ ] P2.3 Close cooldown races
 - [ ] P2.4 Fix collector cadence drift
 - [ ] P3.1 Memories fallback to latest file

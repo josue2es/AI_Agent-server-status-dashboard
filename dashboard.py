@@ -8,6 +8,7 @@ from. Agent data (cron jobs, memories, issues, auth profiles, model
 config) is read from each configured user's openclaw workspace.
 """
 
+import contextlib
 import hashlib
 import hmac
 import json
@@ -97,15 +98,16 @@ def user_path(user, *parts):
 
 def init_db():
     os.makedirs(DATA_DIR, exist_ok=True)
-    conn = sqlite3.connect(DB_PATH)
-    conn.execute('''CREATE TABLE IF NOT EXISTS metrics
-                    (timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
-                     cpu REAL, ram REAL, rx REAL, tx REAL, ping REAL, jitter REAL, loss REAL)''')
-    conn.execute('''CREATE TABLE IF NOT EXISTS speedtests
-                    (timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
-                     download REAL, upload REAL, ping REAL)''')
-    conn.commit()
-    conn.close()
+    with contextlib.closing(sqlite3.connect(DB_PATH)) as conn:
+        # WAL lets the UI and API read while the collector thread writes.
+        conn.execute('PRAGMA journal_mode=WAL')
+        conn.execute('''CREATE TABLE IF NOT EXISTS metrics
+                        (timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+                         cpu REAL, ram REAL, rx REAL, tx REAL, ping REAL, jitter REAL, loss REAL)''')
+        conn.execute('''CREATE TABLE IF NOT EXISTS speedtests
+                        (timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+                         download REAL, upload REAL, ping REAL)''')
+        conn.commit()
 
 
 def fetch_history(limit=DISPLAY_POINTS):
@@ -113,11 +115,10 @@ def fetch_history(limit=DISPLAY_POINTS):
 
     Timestamps are stored in UTC by SQLite and converted to LOCAL_TZ here.
     """
-    conn = sqlite3.connect(DB_PATH)
-    rows = conn.execute(
-        'SELECT timestamp, cpu, ram, rx, tx, ping, jitter, loss '
-        'FROM metrics ORDER BY timestamp DESC LIMIT ?', (limit,)).fetchall()
-    conn.close()
+    with contextlib.closing(sqlite3.connect(DB_PATH)) as conn:
+        rows = conn.execute(
+            'SELECT timestamp, cpu, ram, rx, tx, ping, jitter, loss '
+            'FROM metrics ORDER BY timestamp DESC LIMIT ?', (limit,)).fetchall()
     rows.reverse()
     labels = []
     for r in rows:
@@ -273,15 +274,16 @@ def collector():
                 total_diff = data['cpu_raw']['total'] - last_cpu_total
                 cpu_pct = ((total_diff - idle_diff) / total_diff) * 100.0 if total_diff > 0 else 0.0
 
-                conn = sqlite3.connect(DB_PATH)
-                conn.execute(
-                    'INSERT INTO metrics (cpu, ram, rx, tx, ping, jitter, loss) VALUES (?, ?, ?, ?, ?, ?, ?)',
-                    (round(cpu_pct, 1), data.get('ram_percent', 0),
-                     round(rx_bps, 2), round(tx_bps, 2),
-                     data.get('ping_avg', 0), data.get('jitter', 0), data.get('packet_loss', 0)))
-                conn.execute('DELETE FROM metrics WHERE timestamp < datetime("now", "-24 hours")')
-                conn.commit()
-                conn.close()
+                with contextlib.closing(sqlite3.connect(DB_PATH)) as conn:
+                    conn.execute(
+                        'INSERT INTO metrics (cpu, ram, rx, tx, ping, jitter, loss) '
+                        'VALUES (?, ?, ?, ?, ?, ?, ?)',
+                        (round(cpu_pct, 1), data.get('ram_percent', 0),
+                         round(rx_bps, 2), round(tx_bps, 2),
+                         data.get('ping_avg', 0), data.get('jitter', 0),
+                         data.get('packet_loss', 0)))
+                    conn.execute('DELETE FROM metrics WHERE timestamp < datetime("now", "-24 hours")')
+                    conn.commit()
 
             last_rx = data['net_rx_bytes']
             last_tx = data['net_tx_bytes']
@@ -577,11 +579,10 @@ def do_speedtest():
                                f"Upload: {up_mbps:.2f} Mbps\nServer: {server} ({location})")
     last_speedtest_time = time.time()
 
-    conn = sqlite3.connect(DB_PATH)
-    conn.execute('INSERT INTO speedtests (download, upload, ping) VALUES (?, ?, ?)',
-                 (down_mbps, up_mbps, ping))
-    conn.commit()
-    conn.close()
+    with contextlib.closing(sqlite3.connect(DB_PATH)) as conn:
+        conn.execute('INSERT INTO speedtests (download, upload, ping) VALUES (?, ?, ?)',
+                     (down_mbps, up_mbps, ping))
+        conn.commit()
     return cached_speedtest_result
 
 
