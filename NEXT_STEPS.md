@@ -27,7 +27,7 @@ Produced 2026-07-31 from a full code review of `dashboard.py` plus the owner's f
 - [x] P2.1 Configurable network interface
 - [x] P2.2 Safe SQLite handling (close + WAL)
 - [x] P2.3 Close cooldown races
-- [ ] P2.4 Fix collector cadence drift
+- [x] P2.4 Fix collector cadence drift
 - [ ] P3.1 Memories fallback to latest file
 - [ ] P3.2 Refresh MODEL_OPTIONS
 - [ ] P3.3 Pin nicegui upper bound

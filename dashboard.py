@@ -264,6 +264,7 @@ def collector():
     """Background thread: samples system metrics every 15s into SQLite."""
     last_rx = last_tx = last_cpu_idle = last_cpu_total = last_time = None
     while True:
+        started = time.monotonic()
         try:
             data = get_sys_info()
             now = time.time()
@@ -299,7 +300,10 @@ def collector():
                 latest.update(data)
         except Exception as e:
             print(f"Collector error: {e}")
-        time.sleep(COLLECT_INTERVAL)
+        # Sleep the remainder of the interval, not a full interval on top of a
+        # sample that already took ~4s on the ping — otherwise the real cadence
+        # is ~19s and the 720-point window spans 4h instead of the stated 3h.
+        time.sleep(max(0.0, COLLECT_INTERVAL - (time.monotonic() - started)))
 
 
 # -------------------------------------------------- multi-user agent data

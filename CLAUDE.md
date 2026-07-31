@@ -68,7 +68,7 @@ Sections are delimited by `# ---------------- <name>` comments. Grep the section
 
 - `PASSWORD_HASH` has no default: unset means a random password is generated and printed once at startup, its hash persisted at `DATA_DIR/.password_hash`. Never commit a real password hash, and never reintroduce a default.
 - `MODEL_OPTIONS` values must be exact provider model IDs. Never guess or construct an ID; verify against the provider's official docs before changing them.
-- Real collector cadence is ~19–20 s (15 s sleep after a ~4 s blocking ping), so the 720-sample chart window spans closer to 4 h than 3 h (see NEXT_STEPS.md P2).
+- The collector sleeps the *remainder* of `COLLECT_INTERVAL` after each sample, so the real cadence is 15 s even though the ping blocks ~4 s. Don't change it back to a flat `sleep(COLLECT_INTERVAL)`.
 - `test_api` uses raw `urllib` on purpose (zero extra dependencies). Do not introduce provider SDKs for it.
 
 ## Pending work
