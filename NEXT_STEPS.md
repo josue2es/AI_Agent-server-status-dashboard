@@ -15,15 +15,15 @@ Produced 2026-07-31 from a full code review of `dashboard.py` plus the owner's f
 
 ## Task list
 
-- [ ] P1.1 Remove default password hash
-- [ ] P1.2 Google API key out of the URL
-- [ ] F1.1 Data-source seam (local vs remote)
-- [ ] F1.2 Node mode + JSON API + token auth
-- [ ] F1.3 Server registry (`servers.json`)
-- [ ] F1.4 Server selector on the main page
-- [ ] F1.5 "Add server" dialog (with AI-agents step)
-- [ ] F1.6 Remote actions (API test, speed test)
-- [ ] F1.7 Documentation update
+- [x] P1.1 Remove default password hash
+- [x] P1.2 Google API key out of the URL
+- [x] F1.1 Data-source seam (local vs remote)
+- [x] F1.2 Node mode + JSON API + token auth
+- [x] F1.3 Server registry (`servers.json`)
+- [x] F1.4 Server selector on the main page
+- [x] F1.5 "Add server" dialog (with AI-agents step)
+- [x] F1.6 Remote actions (API test, speed test)
+- [x] F1.7 Documentation update
 - [ ] P2.1 Configurable network interface
 - [ ] P2.2 Safe SQLite handling (close + WAL)
 - [ ] P2.3 Close cooldown races
