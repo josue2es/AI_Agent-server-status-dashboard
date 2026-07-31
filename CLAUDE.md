@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project
 
-Single-file server monitoring dashboard (`dashboard.py`, ~700 lines) built with [NiceGUI](https://nicegui.io). Runs as root under systemd, samples system metrics into SQLite, and aggregates openclaw data (cron jobs, agent memories, issues, API auth profiles) from multiple Linux users' `~/.openclaw` directories. The dashboard itself makes no LLM calls; the API Test panel sends one ~10-token prompt only when a human clicks Test.
+Single-file server monitoring dashboard (`dashboard.py`, ~860 lines) built with [NiceGUI](https://nicegui.io). Runs as root under systemd, samples system metrics into SQLite, and aggregates AI-agent data (cron jobs, memories, issues, API auth profiles, model/profile config) from multiple Linux users — currently read from each user's `~/.openclaw` directory. The dashboard itself makes no LLM calls; the API Test panel sends one ~10-token prompt only when a human clicks Test.
 
 There is no build step, no linter config, and no test suite.
 
@@ -25,10 +25,11 @@ Sections are delimited by `# ---------------- <name>` comments. Grep the section
 
 | Section marker | Functions | Purpose |
 |---|---|---|
-| (top of file) | — | env config, `MODEL_OPTIONS`, cooldown constants, module globals |
+| (top of file) | — | env config (`AGENT_USERS`, `MODEL_CONFIG_FILES`, `DISK_PATH`, …), `MODEL_OPTIONS`, cooldown constants, module globals |
 | `database` | `init_db`, `fetch_history` | SQLite schema (`metrics`, `speedtests`); history as parallel lists for charts |
 | `metric collector` | `get_sys_info`, `collector` | daemon thread; samples /proc + ping every 15 s into SQLite, 24 h retention |
-| `multi-user openclaw data` | `get_cron_jobs`, `get_memories`, `get_issues`, `find_api_key` | read `/home/<user>/.openclaw/...` for each user in `DASHBOARD_USERS` |
+| `multi-user agent data` | `get_cron_jobs`, `get_memories`, `get_issues`, `find_api_key` | read `/home/<user>/.openclaw/...` for each user in `DASHBOARD_USERS` |
+| `model / profile config` | `_fmt_model`, `_parse_profile`, `_load_profiles`, `get_model_config` | per-agent model/profile tables from `agents/<agent>/[agent/]{MODEL_CONFIG_FILES}`; deliberately tolerant parser |
 | `API test` | `test_api` | one-shot latency probe to Anthropic / Google / Moonshot via raw `urllib` |
 | `speed test` | `do_speedtest` | Ookla CLI wrapper (~20 s, blocking), 1 h cooldown |
 | `UI` | `make_chart`, `set_chart_data`, `section_card`, `login_page`, `main_page` | NiceGUI pages; `main_page` is rebuilt per client and driven by two `ui.timer`s (15 s stats, 60 s openclaw data) |
@@ -41,7 +42,7 @@ Sections are delimited by `# ---------------- <name>` comments. Grep the section
 - **Timestamps:** SQLite stores UTC (`CURRENT_TIMESTAMP`); conversion to `LOCAL_TZ` happens only at display time (`fetch_history`, cron/memory formatting).
 - **Charts:** `fetch_history` returns parallel lists; `set_chart_data(chart, labels, *series)` takes one list per series in the order the chart's series were declared in `make_chart`.
 - **Multiprocessing guard:** the `__name__ in {'__main__', '__mp_main__'}` check is required — NiceGUI re-imports the module in a child process. Don't remove it.
-- **Missing user files are normal:** all openclaw readers skip absent files silently (users may not have cron jobs / memories / issues). That is intentional, not a bug.
+- **Missing user files are normal:** all agent-data readers skip absent files/dirs silently (users may not have cron jobs / memories / issues / model config). That is intentional, not a bug.
 
 ## Conventions
 
