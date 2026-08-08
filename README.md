@@ -180,6 +180,24 @@ sudo /opt/ai-agents-dashboard/venv/bin/pip install -r /opt/ai-agents-dashboard/r
 sudo systemctl restart ai-agents-dashboard
 ```
 
+**Don't stop the service first.** The running process already holds the old code in memory, so copying the file over it changes nothing until a fresh process starts — the `restart` is what applies the update. (`Restart=on-failure` only covers crashes; it will not pick up a new file on its own.)
+
+**Unit file changes are never required.** Every `DASHBOARD_*` variable has a default, so a new version runs on your existing unit unchanged. You edit the unit only to *set* one — and then the order matters, because systemd keeps serving the cached unit until told otherwise:
+
+```bash
+sudo nano /etc/systemd/system/ai-agents-dashboard.service   # add/change Environment= lines
+sudo systemctl daemon-reload                                # without this, your edit is ignored
+sudo systemctl restart ai-agents-dashboard
+```
+
+**Verify what actually started.** Startup facts go to the journal, not to the web UI:
+
+```bash
+sudo journalctl -u ai-agents-dashboard -n 30 --no-pager
+```
+
+Every boot logs one speed-test line — `Speed test: /usr/bin/speedtest (ookla CLI)` when a CLI was found, or `Speed test unavailable: no speed-test CLI on PATH — install …` when none was. Seeing neither means the process is still running the old build: either the file didn't land where `ExecStart` points, or the restart didn't happen.
+
 ## Configuration
 
 All configuration is via environment variables ([`.env.example`](.env.example) lists them all). The app reads real environment variables — it does **not** auto-load a `.env` file; set them in the shell or as `Environment=` lines in the systemd unit:
