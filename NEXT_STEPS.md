@@ -33,6 +33,7 @@ Produced 2026-07-31 from a full code review of `dashboard.py` plus the owner's f
 - [x] P3.3 Pin nicegui upper bound
 - [x] P3.4 /health endpoint
 - [x] P3.5 Env-list hygiene
+- [x] D1.1 Speed-test CLI discovery (reported from a live install)
 
 ## P1 — Security (land these first; they are small)
 
@@ -160,6 +161,14 @@ Unauthenticated `GET /health` → 200 + `{"status": "ok", "last_sample_age_s": .
 
 ### P3.5 Env-list hygiene
 `AGENT_USERS` and `MODEL_CONFIG_FILES` are built with bare `.split(',')` — a value like `"a, b"` yields entries with leading spaces (and trailing commas yield empty strings), which silently break path lookups. Strip each item and drop empties in both (and in any comma-list env F1 adds).
+
+## D — Deployment findings (raised against a running install, not the original review)
+
+### D1.1 Speed-test CLI discovery
+- **Where:** `SPEEDTEST_BIN` (top of file), `speed test` section.
+- **Problem:** reported from a live hub — `Speedtest failed: [Errno 2] No such file or directory: 'speedtest-ookla'`. The default binary name was one almost nobody has: Ookla's own package installs `speedtest`, and `apt install speedtest-cli` installs the unrelated Python clone (different flags, and throughput in bits/s rather than Ookla's bytes/s) under both `speedtest-cli` and `speedtest`. A missing binary also surfaced as a bare `FileNotFoundError`, with no hint of what to install.
+- **Change:** `find_speedtest()` searches `speedtest`, `speedtest-ookla`, `speedtest-cli`, then `/usr/bin`, `/usr/local/bin`, `/snap/bin` (snap's dir is absent from systemd's `PATH`); `speedtest_flavor()` tells the two CLIs apart with `--version` and `do_speedtest()` sends each its own flags and reads its own JSON shape. Every failure — not found, misconfigured, timeout, non-JSON body — raises a sentence naming the cause and the fix. Resolution happens per run, so installing the CLI needs no restart. Config is now `DASHBOARD_SPEEDTEST_BIN` (auto-detect when unset), with `SPEEDTEST_BIN` still honoured; the resolved CLI is logged at startup.
+- **Accept:** the panel works with either CLI installed under any of those names; with none installed the panel and the startup log both say what to install; the hour-long cooldown is not burned by a failed run.
 
 ## Out of scope (decided — do not do)
 

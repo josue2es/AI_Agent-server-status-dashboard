@@ -56,7 +56,12 @@ PORT = int(os.environ.get('DASHBOARD_PORT', '8080'))
 DATA_DIR = os.environ.get('DASHBOARD_DATA_DIR', '/var/lib/ai-agents-dashboard')
 DB_PATH = os.path.join(DATA_DIR, 'dashboard.db')
 SERVERS_PATH = os.path.join(DATA_DIR, 'servers.json')
-SPEEDTEST_BIN = os.environ.get('SPEEDTEST_BIN', 'speedtest-ookla')
+# Speed-test CLI. Empty (the default) means auto-detect: the Ookla package
+# installs itself as 'speedtest', not 'speedtest-ookla', so a hard-coded name
+# was wrong on most installs. SPEEDTEST_BIN is the pre-DASHBOARD_ spelling,
+# still honoured so existing units keep working.
+SPEEDTEST_BIN = (os.environ.get('DASHBOARD_SPEEDTEST_BIN')
+                 or os.environ.get('SPEEDTEST_BIN', '')).strip()
 # Candidate filenames (in order) for an agent's model/profile config, tried both
 # directly under the agent dir and under its 'agent/' subdir. Override with
 # DASHBOARD_MODEL_CONFIG (comma-separated).
@@ -645,22 +650,88 @@ def release_speedtest():
 
 # ------------------------------------------------------------ speed test
 
+# Names tried, in order, when no binary is configured. Ookla's own package
+# installs 'speedtest'; a few distros ship it as 'speedtest-ookla'. The
+# absolute paths cover snap, whose /snap/bin is absent from systemd's PATH.
+SPEEDTEST_CANDIDATES = ['speedtest', 'speedtest-ookla', 'speedtest-cli',
+                        '/usr/bin/speedtest', '/usr/local/bin/speedtest',
+                        '/snap/bin/speedtest']
+SPEEDTEST_TIMEOUT = 75  # seconds; under REMOTE_ACTION_TIMEOUT so a hub sees the error
+SPEEDTEST_INSTALL_HINT = ('install the Ookla CLI (https://www.speedtest.net/apps/cli) '
+                          'or run "apt install speedtest-cli"')
+
+
+def speedtest_flavor(path):
+    """'ookla' or 'python' — the two CLIs share names but not flags or JSON.
+
+    Ookla's --version mentions Ookla; the Python clone (sivel/speedtest-cli,
+    what 'apt install speedtest-cli' gives you) prints 'speedtest-cli 2.x'.
+    It also installs a 'speedtest' entry point, so the name alone proves
+    nothing. Anything unrecognised is treated as Ookla, the documented one.
+    """
+    try:
+        probe = subprocess.run([path, '--version'], capture_output=True, text=True, timeout=15)
+    except Exception:
+        return 'ookla'
+    text = f'{probe.stdout} {probe.stderr}'.lower()
+    return 'python' if 'speedtest-cli' in text and 'ookla' not in text else 'ookla'
+
+
+def find_speedtest():
+    """Locate the speed-test CLI; returns (path, flavor). Raises with an install hint.
+
+    Resolved per run rather than at import, so installing the CLI doesn't
+    require restarting the service.
+    """
+    if SPEEDTEST_BIN:
+        path = shutil.which(SPEEDTEST_BIN)  # also accepts an absolute path
+        if not path:
+            raise Exception(f"configured speed-test CLI '{SPEEDTEST_BIN}' not found — "
+                            f'fix DASHBOARD_SPEEDTEST_BIN, or {SPEEDTEST_INSTALL_HINT}')
+        return path, speedtest_flavor(path)
+    for name in SPEEDTEST_CANDIDATES:
+        path = shutil.which(name)
+        if path:
+            return path, speedtest_flavor(path)
+    raise Exception(f'no speed-test CLI on PATH — {SPEEDTEST_INSTALL_HINT}, '
+                    'or set DASHBOARD_SPEEDTEST_BIN to its path')
+
+
 def do_speedtest():
-    """Run the Ookla CLI (~20s, blocking — call via run.io_bound) and record the result."""
+    """Run the speed-test CLI (~20s, blocking — call via run.io_bound) and record the result."""
     global last_speedtest_time, cached_speedtest_result
-    result = subprocess.run(
-        [SPEEDTEST_BIN, '--accept-license', '--accept-gdpr', '-f', 'json'],
-        capture_output=True, text=True)
+    path, flavor = find_speedtest()
+    args = ([path, '--accept-license', '--accept-gdpr', '-f', 'json'] if flavor == 'ookla'
+            else [path, '--json', '--secure'])
+    try:
+        result = subprocess.run(args, capture_output=True, text=True, timeout=SPEEDTEST_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        raise Exception(f'{path} did not finish within {SPEEDTEST_TIMEOUT}s')
     if result.returncode != 0:
-        raise Exception(result.stderr.strip() or f'Process exited with {result.returncode}')
+        raise Exception(result.stderr.strip() or result.stdout.strip()
+                        or f'{path} exited with {result.returncode}')
     out = result.stdout
-    # Ookla CLI sometimes prints warnings before the JSON
-    data = json.loads(out[out.find('{'):] if '{' in out else out)
-    ping = data.get('ping', {}).get('latency', 0)
-    down_mbps = data.get('download', {}).get('bandwidth', 0) * 8 / 1000000
-    up_mbps = data.get('upload', {}).get('bandwidth', 0) * 8 / 1000000
-    server = data.get('server', {}).get('name', 'Unknown')
-    location = data.get('server', {}).get('location', 'Unknown')
+    try:
+        # Either CLI may print warnings before the JSON
+        data = json.loads(out[out.find('{'):] if '{' in out else out)
+    except ValueError:
+        # A captive portal or a proxy's error page reaches us as an exit-0 non-JSON
+        # body; show what it actually said instead of a bare JSONDecodeError.
+        noise = (out or result.stderr).strip()
+        raise Exception(f'{path} returned no JSON: {noise[:200] if noise else "no output"}')
+    srv = data.get('server', {})
+    if flavor == 'ookla':
+        ping = data.get('ping', {}).get('latency', 0)
+        down_mbps = data.get('download', {}).get('bandwidth', 0) * 8 / 1000000  # bytes/s
+        up_mbps = data.get('upload', {}).get('bandwidth', 0) * 8 / 1000000
+        server = srv.get('name', 'Unknown')
+        location = srv.get('location', 'Unknown')
+    else:
+        ping = data.get('ping', 0)
+        down_mbps = data.get('download', 0) / 1000000  # already bits/s
+        up_mbps = data.get('upload', 0) / 1000000
+        server = srv.get('sponsor', 'Unknown')
+        location = srv.get('name', 'Unknown')
 
     cached_speedtest_result = (f"Ping: {ping:.2f} ms\nDownload: {down_mbps:.2f} Mbps\n"
                                f"Upload: {up_mbps:.2f} Mbps\nServer: {server} ({location})")
@@ -1480,6 +1551,13 @@ if __name__ in {'__main__', '__mp_main__'}:
         raise SystemExit('DASHBOARD_MODE=node requires DASHBOARD_NODE_TOKEN '
                          '(the shared secret the hub presents).')
     init_db()
+    # Report the speed-test CLI at boot: the panel is otherwise the only place
+    # a missing or misnamed binary shows up, an hour-long cooldown away.
+    try:
+        _st_path, _st_flavor = find_speedtest()
+        print(f'Speed test: {_st_path} ({_st_flavor} CLI)', flush=True)
+    except Exception as e:
+        print(f'Speed test unavailable: {e}', flush=True)
     if MODE == 'hub':
         PASSWORD_HASH = load_password_hash()
     register_health()

@@ -14,7 +14,7 @@ A self-hosted monitoring dashboard for a fleet of servers — those running AI a
 - **AI agent integration** — displays active cron jobs, agent memories, and issues from every configured user (default: `hermes` and `openclaw`), each entry tagged with its owner
 - **Model configuration** — a per-agent table of each profile's primary provider/model, reasoning level, and fallback chain, across every agent of every user
 - **API health test** — test Anthropic, Google, and Moonshot/Kimi keys directly from the dashboard with latency measurement (keys are discovered across all configured users' auth profiles)
-- **Internet speed test** — powered by Ookla speedtest CLI, rate-limited to once per hour
+- **Internet speed test** — powered by the Ookla or Python speedtest CLI (auto-detected), rate-limited to once per hour
 - **Password login** — session-based auth, sessions survive restarts
 - **Health endpoint** — unauthenticated `GET /health` for uptime monitors
 - **Zero token usage** — the dashboard itself makes no LLM calls
@@ -24,7 +24,10 @@ A self-hosted monitoring dashboard for a fleet of servers — those running AI a
 - Python 3.10+
 - [NiceGUI](https://nicegui.io) (`pip install -r requirements.txt`)
 - Optional: [openclaw](https://openclaw.ai) under one or more user accounts, for the AI-agent panels
-- Ookla speedtest CLI on `PATH` as `speedtest-ookla` (optional, for the speed test feature)
+- A speed-test CLI on `PATH` (optional, for the speed test feature) — either the
+  [Ookla CLI](https://www.speedtest.net/apps/cli) (installs as `speedtest`) or the Python
+  `speedtest-cli` (`apt install speedtest-cli`). Both are detected automatically, and the
+  one in use is logged at startup (`Speed test: /usr/bin/speedtest (ookla CLI)`)
 
 ## Monitoring more than one server
 
@@ -195,7 +198,7 @@ All configuration is via environment variables ([`.env.example`](.env.example) l
 | `DASHBOARD_PASSWORD_HASH` | Generated on first run | SHA-256 hash of the login password. When unset, a random password is generated, printed once to the log, and its hash persisted in the data dir |
 | `DASHBOARD_SECRET` | Auto-generated, persisted | Secret for session cookies |
 | `DASHBOARD_TZ` | `America/El_Salvador` | Timezone for chart labels and cron times |
-| `SPEEDTEST_BIN` | `speedtest-ookla` | Path to the Ookla speedtest CLI |
+| `DASHBOARD_SPEEDTEST_BIN` | *(auto-detect)* | Path to the speed-test CLI. Unset searches `speedtest`, `speedtest-ookla`, `speedtest-cli` on `PATH`, then `/usr/bin`, `/usr/local/bin` and `/snap/bin`. The legacy name `SPEEDTEST_BIN` is still read |
 
 ## Dashboard Layout
 
