@@ -1,1 +1,2 @@
 nicegui>=2.0,<4
+pyyaml>=6.0

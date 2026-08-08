@@ -36,6 +36,8 @@ Produced 2026-07-31 from a full code review of `dashboard.py` plus the owner's f
 - [x] D1.1 Speed-test CLI discovery (reported from a live install)
 - [x] D1.2 Hide the agent panels on servers with no agents
 - [x] D1.3 Speed-test cooldown 1 h → 3 min
+- [x] D2.1 Hermes Agent workspace support
+- [ ] D2.2 Hermes API key discovery (follow-up, see below)
 
 ## P1 — Security (land these first; they are small)
 
@@ -183,6 +185,20 @@ Unauthenticated `GET /health` → 200 + `{"status": "ok", "last_sample_age_s": .
 - **Problem:** the owner found an hour between runs unusable in practice — after a network change you want to re-measure now, not next hour. (Supersedes the `1 h cooldown` wording in F1.2 above.)
 - **Change:** default 180 s, overridable with `DASHBOARD_SPEEDTEST_COOLDOWN`. The rate-limit message was minute-granular ("1 minutes" with 3 s left); `_fmt_wait()` now renders `45s` / `3m` / `2m 23s`, and the card title reports the configured value instead of a hard-coded "Max 1/hour".
 - **Accept:** two runs 3 minutes apart both go through; the second of two quick clicks is refused with the remaining time in seconds; the card title matches whatever the env var says.
+
+## D2 — Hermes Agent support
+
+### D2.1 Read Hermes workspaces
+- **Where:** `multi-user agent data`, `model / profile config`, `requirements.txt`.
+- **Problem:** every reader hard-coded `~/.openclaw` paths, so a host running [Hermes Agent](https://github.com/NousResearch/hermes-agent) (which stores the equivalent data under `~/.hermes` in a different layout) rendered every agent panel empty.
+- **Change:** `workspace_kind(user)` picks one layout per user — `~/.openclaw`, else `~/.hermes`, else nothing — and each reader dispatches to an `_openclaw_*` or `_hermes_*` branch that returns the *same* dict shapes. Hermes mappings: `cron/jobs.json` with ISO timestamps and a cron expression (description carries schedule + last run; the `prompt` is payload, not description); `memories/MEMORY.md` + `memories/USER.md` tagged by source instead of one file per day; no ISSUES.md equivalent, so those users contribute nothing; `config.yaml` as the `default` profile plus one per `profiles/<name>/config.yaml`, translated onto the openclaw profile keys so `_parse_profile` does the formatting (note the model id is `model.default`, not `model.model`). Adds `pyyaml`, imported behind a guard so a missed `pip install` costs only the Hermes model table.
+- **Accept:** on a Hermes-only host `/api/agentdata` reports the user in `present`, lists its cron jobs, and shows `default` + one row per profile with the right provider/model/reasoning/fallbacks, issues empty; on an openclaw host every reader's output is unchanged (verified by diffing all five readers against the pre-change file); malformed or missing individual files are still skipped silently.
+
+### D2.2 Hermes API key discovery (not done — deliberate)
+- **Where:** `find_api_key`, and whatever reads `~/.hermes/auth.json`.
+- **Problem:** `find_api_key` reads openclaw auth profiles only, so on a Hermes-only host the API test panel is visible (that server does have agents) but every probe answers `No API key configured for provider '<name>'`.
+- **Change:** read `~/.hermes/auth.json` — schema differs from openclaw's `auth-profiles.json`, so confirm it against a real file first. Never log or render key material. Left out of D2.1 on the owner's instruction: mixing credential handling into that change would have muddied review.
+- **Accept:** the API test finds a key on a Hermes-only host and reports latency, with no key material in any log, response, or panel.
 
 ## Out of scope (decided — do not do)
 
