@@ -8,13 +8,13 @@ A self-hosted monitoring dashboard for a fleet of servers — those running AI a
 
 ## Features
 
-- **Multi-server monitoring** — pick a server from the header and the whole page reloads for it. Add servers from a popup dialog (no CLI, no restart); each one is asked whether it runs AI agents, and the agent panels only appear for those that do
+- **Multi-server monitoring** — pick a server from the header and the whole page reloads for it. Add servers from a popup dialog (no CLI, no restart); each one is asked whether it runs AI agents, and the agent panels only appear for those that do — a plain server shows the system panels and nothing else
 - **Live system stats** — CPU, RAM, disk, network throughput, ping/jitter/packet loss
 - **Historical charts** — rolling window of the last 720 samples (~3 h), 24-hour retention in SQLite (ECharts)
 - **AI agent integration** — displays active cron jobs, agent memories, and issues from every configured user (default: `hermes` and `openclaw`), each entry tagged with its owner
 - **Model configuration** — a per-agent table of each profile's primary provider/model, reasoning level, and fallback chain, across every agent of every user
 - **API health test** — test Anthropic, Google, and Moonshot/Kimi keys directly from the dashboard with latency measurement (keys are discovered across all configured users' auth profiles)
-- **Internet speed test** — powered by Ookla speedtest CLI, rate-limited to once per hour
+- **Internet speed test** — powered by the Ookla or Python speedtest CLI (auto-detected), rate-limited to once per hour
 - **Password login** — session-based auth, sessions survive restarts
 - **Health endpoint** — unauthenticated `GET /health` for uptime monitors
 - **Zero token usage** — the dashboard itself makes no LLM calls
@@ -24,7 +24,10 @@ A self-hosted monitoring dashboard for a fleet of servers — those running AI a
 - Python 3.10+
 - [NiceGUI](https://nicegui.io) (`pip install -r requirements.txt`)
 - Optional: [openclaw](https://openclaw.ai) under one or more user accounts, for the AI-agent panels
-- Ookla speedtest CLI on `PATH` as `speedtest-ookla` (optional, for the speed test feature)
+- A speed-test CLI on `PATH` (optional, for the speed test feature) — either the
+  [Ookla CLI](https://www.speedtest.net/apps/cli) (installs as `speedtest`) or the Python
+  `speedtest-cli` (`apt install speedtest-cli`). Both are detected automatically, and the
+  one in use is logged at startup (`Speed test: /usr/bin/speedtest (ookla CLI)`)
 
 ## Monitoring more than one server
 
@@ -55,7 +58,7 @@ Every route requires `Authorization: Bearer <DASHBOARD_NODE_TOKEN>` and answers 
 | `GET /api/ping` | Reachability + auth check (`{"ok": true, "mode", "name", "agents"}`) |
 | `GET /api/snapshot` | The latest system snapshot |
 | `GET /api/history?limit=720` | Chart history |
-| `GET /api/agentdata?users=a,b` | Cron jobs, memories, issues and model config for those users |
+| `GET /api/agentdata?users=a,b` | Cron jobs, memories, issues and model config for those users, plus `present`: which of them actually has a workspace |
 | `POST /api/apitest` | Runs the API probe on that server (body `{"provider", "model"}`) |
 | `POST /api/speedtest` | Runs the speed test on that server |
 
@@ -195,7 +198,7 @@ All configuration is via environment variables ([`.env.example`](.env.example) l
 | `DASHBOARD_PASSWORD_HASH` | Generated on first run | SHA-256 hash of the login password. When unset, a random password is generated, printed once to the log, and its hash persisted in the data dir |
 | `DASHBOARD_SECRET` | Auto-generated, persisted | Secret for session cookies |
 | `DASHBOARD_TZ` | `America/El_Salvador` | Timezone for chart labels and cron times |
-| `SPEEDTEST_BIN` | `speedtest-ookla` | Path to the Ookla speedtest CLI |
+| `DASHBOARD_SPEEDTEST_BIN` | *(auto-detect)* | Path to the speed-test CLI. Unset searches `speedtest`, `speedtest-ookla`, `speedtest-cli` on `PATH`, then `/usr/bin`, `/usr/local/bin` and `/snap/bin`. The legacy name `SPEEDTEST_BIN` is still read |
 
 ## Dashboard Layout
 
@@ -203,12 +206,18 @@ All configuration is via environment variables ([`.env.example`](.env.example) l
 1. Live Resource Usage (CPU & RAM)
 2. Network Stats (latency, jitter, packet loss)
 3. Network Throughput
-4. API Test / Memory & Disk / Speed Test
+4. API Test\* / Memory & Disk / Speed Test
 5. Top Processes & Security Logins
-6. Active Cron Jobs (all users)
-7. Model Configuration — All Profiles (per agent)
-8. Recent Memories (per user)
-9. Active & Resolved Issues (tagged by user)
+6. Active Cron Jobs (all users)\*
+7. Model Configuration — All Profiles (per agent)\*
+8. Recent Memories (per user)\*
+9. Active & Resolved Issues (tagged by user)\*
+
+\* Agent panels. They are shown only when the selected server actually has an agent
+workspace — listing usernames isn't enough, since `DASHBOARD_USERS` carries a default and
+would otherwise leave a column of empty boxes on every plain server. Install openclaw for
+one of those users and the panels appear within a minute, no restart. (The API test is in
+this group because the keys it probes come from the agents' auth profiles.)
 
 ## Architecture (for contributors & AI agents)
 

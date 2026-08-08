@@ -33,10 +33,10 @@ Sections are delimited by `# ---------------- <name>` comments. Grep the section
 | (top of file) | — | env config (`AGENT_USERS`, `MODEL_CONFIG_FILES`, `DISK_PATH`, …), `MODEL_OPTIONS`, cooldown constants, module globals |
 | `database` | `init_db`, `fetch_history` | SQLite schema (`metrics`, `speedtests`); history as parallel lists for charts |
 | `metric collector` | `get_sys_info`, `collector` | daemon thread; samples /proc + ping every 15 s into SQLite, 24 h retention |
-| `multi-user agent data` | `get_cron_jobs`, `get_memories`, `get_issues`, `find_api_key` | read `/home/<user>/.openclaw/...` for each user in `DASHBOARD_USERS` |
+| `multi-user agent data` | `agent_workspaces`, `get_cron_jobs`, `get_memories`, `get_issues`, `find_api_key` | read `/home/<user>/.openclaw/...` for each user in `DASHBOARD_USERS`; `agent_workspaces` returns which of them exist at all |
 | `model / profile config` | `_fmt_model`, `_parse_profile`, `_load_profiles`, `get_model_config` | per-agent model/profile tables from `agents/<agent>/[agent/]{MODEL_CONFIG_FILES}`; deliberately tolerant parser |
 | `API test` | `test_api` | one-shot latency probe to Anthropic / Google / Moonshot via raw `urllib` |
-| `speed test` | `do_speedtest` | Ookla CLI wrapper (~20 s, blocking), 1 h cooldown |
+| `speed test` | `speedtest_flavor`, `find_speedtest`, `do_speedtest` | speed-test CLI wrapper (~20 s, blocking), 1 h cooldown; auto-detects the Ookla CLI or the Python `speedtest-cli` |
 | `server registry` | `load_servers`, `save_servers`, `all_servers`, `get_server` | `servers.json` (0600, holds node tokens); `local` is implicit and always first |
 | `data sources` | `source_snapshot`, `source_history`, `source_stats`, `source_agentdata`, `remote_apitest`, `remote_speedtest`, `_node_request` | the local/remote seam every panel reads through |
 | `node API` | `register_health`, `register_node_api`, `_node_authorized` | Bearer-token JSON API under `/api/*`, registered whenever `DASHBOARD_NODE_TOKEN` is set; plus unauthenticated `/health` in both modes |
@@ -54,6 +54,7 @@ Sections are delimited by `# ---------------- <name>` comments. Grep the section
 - **Never bypass the seam:** UI panels must read via `source_*(server)`, never call `fetch_history()` / `get_cron_jobs()` directly. Those return local data and would silently show the wrong server's numbers.
 - **Remote reads are blocking:** every `source_*` call on a remote server is synchronous `urllib`. UI handlers touching them are `async` and go through `run.io_bound`, and every call site catches the exception — an unreachable node must render an inline error, never take the page down.
 - **Agent-data readers take a user list:** `get_cron_jobs/get_memories/get_issues/get_model_config` accept `users=None` (meaning `AGENT_USERS`). The selected server supplies it, and the hub forwards its list to the node — that's what makes the dialog's usernames load-bearing.
+- **Configured ≠ present:** a username in `DASHBOARD_USERS` (which has a default) proves nothing; an existing `~/.openclaw` does. `source_agentdata` and `/api/agentdata` both carry a `present` key listing the users that really have a workspace, and `apply_visibility` shows the agent panels — including the API test, whose keys come from agent auth profiles — only when it is non-empty. The panels are built hidden and revealed once a read confirms them, so no empty boxes flash on a plain server. A node too old to send `present` falls back to the configured list.
 - **Pages are registered conditionally** at the bottom of the UI section (`ui.page('/')(main_page)`), not with `@ui.page` decorators, so node mode can serve the API with no UI. Don't reintroduce the decorators.
 - **`servers.json` holds tokens:** always write it through `save_servers()` (0600). A malformed file degrades to local-only rather than raising.
 
@@ -70,7 +71,8 @@ Sections are delimited by `# ---------------- <name>` comments. Grep the section
 - `MODEL_OPTIONS` values must be exact provider model IDs. Never guess or construct an ID; verify against the provider's official docs before changing them.
 - The collector sleeps the *remainder* of `COLLECT_INTERVAL` after each sample, so the real cadence is 15 s even though the ping blocks ~4 s. Don't change it back to a flat `sleep(COLLECT_INTERVAL)`.
 - `test_api` uses raw `urllib` on purpose (zero extra dependencies). Do not introduce provider SDKs for it.
+- Two different CLIs answer to the name `speedtest`: Ookla's (flags `--accept-license -f json`, bandwidth in **bytes**/s) and the Python `speedtest-cli` (flags `--json`, throughput already in **bits**/s), which installs `speedtest` as a second entry point. `find_speedtest()` resolves the path and `speedtest_flavor()` identifies it via `--version` — never hard-code a binary name or assume one JSON shape.
 
 ## Pending work
 
-Read `NEXT_STEPS.md` before starting changes — it is the authoritative spec and task queue, with acceptance criteria per task. P1 (security) and F1 (multi-server monitoring) are done; P2 (robustness) and P3 (improvements) remain. Keep this file in sync when a task changes the code map or an invariant.
+Read `NEXT_STEPS.md` before starting changes — it is the authoritative spec and task queue, with acceptance criteria per task. Every task in it (P1 security, F1 multi-server monitoring, P2 robustness, P3 improvements) is now done; new work is appended there as it comes in from deployment. Keep this file in sync when a task changes the code map or an invariant.
