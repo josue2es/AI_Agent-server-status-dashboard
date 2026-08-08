@@ -14,7 +14,7 @@ A self-hosted monitoring dashboard for a fleet of servers — those running AI a
 - **AI agent integration** — displays active cron jobs, agent memories, and issues from every configured user (default: `hermes` and `openclaw`), each entry tagged with its owner
 - **Model configuration** — a per-agent table of each profile's primary provider/model, reasoning level, and fallback chain, across every agent of every user
 - **API health test** — test Anthropic, Google, and Moonshot/Kimi keys directly from the dashboard with latency measurement (keys are discovered across all configured users' auth profiles)
-- **Internet speed test** — powered by the Ookla or Python speedtest CLI (auto-detected), rate-limited to once per hour
+- **Internet speed test** — powered by the Ookla or Python speedtest CLI (auto-detected), rate-limited to once every 3 minutes
 - **Password login** — session-based auth, sessions survive restarts
 - **Health endpoint** — unauthenticated `GET /health` for uptime monitors
 - **Zero token usage** — the dashboard itself makes no LLM calls
@@ -180,6 +180,24 @@ sudo /opt/ai-agents-dashboard/venv/bin/pip install -r /opt/ai-agents-dashboard/r
 sudo systemctl restart ai-agents-dashboard
 ```
 
+**Don't stop the service first.** The running process already holds the old code in memory, so copying the file over it changes nothing until a fresh process starts — the `restart` is what applies the update. (`Restart=on-failure` only covers crashes; it will not pick up a new file on its own.)
+
+**Unit file changes are never required.** Every `DASHBOARD_*` variable has a default, so a new version runs on your existing unit unchanged. You edit the unit only to *set* one — and then the order matters, because systemd keeps serving the cached unit until told otherwise:
+
+```bash
+sudo nano /etc/systemd/system/ai-agents-dashboard.service   # add/change Environment= lines
+sudo systemctl daemon-reload                                # without this, your edit is ignored
+sudo systemctl restart ai-agents-dashboard
+```
+
+**Verify what actually started.** Startup facts go to the journal, not to the web UI:
+
+```bash
+sudo journalctl -u ai-agents-dashboard -n 30 --no-pager
+```
+
+Every boot logs one speed-test line — `Speed test: /usr/bin/speedtest (ookla CLI)` when a CLI was found, or `Speed test unavailable: no speed-test CLI on PATH — install …` when none was. Seeing neither means the process is still running the old build: either the file didn't land where `ExecStart` points, or the restart didn't happen.
+
 ## Configuration
 
 All configuration is via environment variables ([`.env.example`](.env.example) lists them all). The app reads real environment variables — it does **not** auto-load a `.env` file; set them in the shell or as `Environment=` lines in the systemd unit:
@@ -199,6 +217,7 @@ All configuration is via environment variables ([`.env.example`](.env.example) l
 | `DASHBOARD_SECRET` | Auto-generated, persisted | Secret for session cookies |
 | `DASHBOARD_TZ` | `America/El_Salvador` | Timezone for chart labels and cron times |
 | `DASHBOARD_SPEEDTEST_BIN` | *(auto-detect)* | Path to the speed-test CLI. Unset searches `speedtest`, `speedtest-ookla`, `speedtest-cli` on `PATH`, then `/usr/bin`, `/usr/local/bin` and `/snap/bin`. The legacy name `SPEEDTEST_BIN` is still read |
+| `DASHBOARD_SPEEDTEST_COOLDOWN` | `180` | Seconds between speed tests, enforced per server. A run saturates the link for ~20 s |
 
 ## Dashboard Layout
 
