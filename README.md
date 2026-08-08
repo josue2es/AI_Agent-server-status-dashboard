@@ -14,7 +14,7 @@ A self-hosted monitoring dashboard for a fleet of servers — those running AI a
 - **AI agent integration** — displays active cron jobs, agent memories, and issues from every configured user (default: `hermes` and `openclaw`), each entry tagged with its owner
 - **Model configuration** — a per-agent table of each profile's primary provider/model, reasoning level, and fallback chain, across every agent of every user
 - **API health test** — test Anthropic, Google, and Moonshot/Kimi keys directly from the dashboard with latency measurement (keys are discovered across all configured users' auth profiles)
-- **Internet speed test** — powered by the Ookla or Python speedtest CLI (auto-detected), rate-limited to once per hour
+- **Internet speed test** — powered by the Ookla or Python speedtest CLI (auto-detected), rate-limited to once every 3 minutes
 - **Password login** — session-based auth, sessions survive restarts
 - **Health endpoint** — unauthenticated `GET /health` for uptime monitors
 - **Zero token usage** — the dashboard itself makes no LLM calls
@@ -199,6 +199,7 @@ All configuration is via environment variables ([`.env.example`](.env.example) l
 | `DASHBOARD_SECRET` | Auto-generated, persisted | Secret for session cookies |
 | `DASHBOARD_TZ` | `America/El_Salvador` | Timezone for chart labels and cron times |
 | `DASHBOARD_SPEEDTEST_BIN` | *(auto-detect)* | Path to the speed-test CLI. Unset searches `speedtest`, `speedtest-ookla`, `speedtest-cli` on `PATH`, then `/usr/bin`, `/usr/local/bin` and `/snap/bin`. The legacy name `SPEEDTEST_BIN` is still read |
+| `DASHBOARD_SPEEDTEST_COOLDOWN` | `180` | Seconds between speed tests, enforced per server. A run saturates the link for ~20 s |
 
 ## Dashboard Layout
 

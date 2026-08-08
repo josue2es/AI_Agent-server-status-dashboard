@@ -82,7 +82,9 @@ LOCAL_TZ = ZoneInfo(os.environ.get('DASHBOARD_TZ', 'America/El_Salvador'))
 PASSWORD_HASH = os.environ.get('DASHBOARD_PASSWORD_HASH', '').strip()
 
 APITEST_COOLDOWN = 30  # seconds between tests per model
-SPEEDTEST_COOLDOWN = 3600  # seconds between speed tests
+# Seconds between speed tests. A run saturates the link for ~20 s, hence a
+# cooldown at all; 3 minutes is short enough to retry after a network change.
+SPEEDTEST_COOLDOWN = int(os.environ.get('DASHBOARD_SPEEDTEST_COOLDOWN', '180'))
 COLLECT_INTERVAL = 15  # seconds between metric samples
 DISPLAY_POINTS = 720  # 3 hours of 15s samples shown on charts
 REMOTE_TIMEOUT = 4  # seconds for a hub -> node data call
@@ -634,6 +636,14 @@ def claim_apitest(provider, model):
         return None
 
 
+def _fmt_wait(seconds):
+    """'45s', '3m', '2m 23s' — the cooldown is configurable, so both scales matter."""
+    seconds = int(seconds)
+    if seconds < 60:
+        return f'{seconds}s'
+    return f'{seconds // 60}m' if seconds % 60 == 0 else f'{seconds // 60}m {seconds % 60}s'
+
+
 def claim_speedtest():
     """Reserve the speed-test slot, or return the rate-limit message.
 
@@ -645,8 +655,9 @@ def claim_speedtest():
     with cooldown_lock:
         now = time.time()
         if last_speedtest_time and now - last_speedtest_time < SPEEDTEST_COOLDOWN:
-            mins = int((SPEEDTEST_COOLDOWN - (now - last_speedtest_time)) // 60) + 1
-            return (f'Rate limited. Try again in {mins} minutes.\n\n'
+            # +1 so a partial second rounds up rather than reading '0s'.
+            wait = _fmt_wait(SPEEDTEST_COOLDOWN - (now - last_speedtest_time) + 1)
+            return (f'Rate limited. Try again in {wait}.\n\n'
                     f'Last result:\n{cached_speedtest_result}')
         last_speedtest_time = now
         return None
@@ -654,7 +665,7 @@ def claim_speedtest():
 
 def release_speedtest():
     """Undo a claim whose run never produced a result, so the next attempt
-    isn't locked out for an hour by a test that never happened."""
+    isn't locked out for a full cooldown by a test that never happened."""
     global last_speedtest_time
     with cooldown_lock:
         last_speedtest_time = 0.0
@@ -994,7 +1005,7 @@ def register_node_api():
         try:
             return {'status': 'ok', 'result': await run_in_threadpool(do_speedtest)}
         except Exception as e:
-            release_speedtest()  # the run failed; don't burn the hour
+            release_speedtest()  # the run failed; don't burn the cooldown
             return {'status': 'error', 'result': f'Speedtest failed: {e}'}
 
 
@@ -1285,7 +1296,8 @@ def main_page():
                 ui.label('Disk (/)').classes('text-xs text-gray-500 mt-2')
                 disk_label = ui.label('Loading...').classes('text-base font-bold text-white')
 
-            with section_card('Internet Speed Test (Max 1/hour)').classes('flex-1'):
+            with section_card(f'Internet Speed Test (Max 1 per {_fmt_wait(SPEEDTEST_COOLDOWN)})') \
+                    .classes('flex-1'):
                 speed_btn = ui.button('Run Speed Test')
                 speed_result = ui.label(cached_speedtest_result).classes(
                     'text-sm text-gray-400 whitespace-pre-wrap')
@@ -1308,7 +1320,7 @@ def main_page():
                             speed_result.set_text(await run.io_bound(remote_speedtest, server))
                     except Exception as e:
                         if is_local(server):
-                            release_speedtest()  # the run failed; don't burn the hour
+                            release_speedtest()  # the run failed; don't burn the cooldown
                         speed_result.set_text(f'Speedtest failed: {e}')
                     finally:
                         speed_btn.enable()
@@ -1589,7 +1601,7 @@ if __name__ in {'__main__', '__mp_main__'}:
                          '(the shared secret the hub presents).')
     init_db()
     # Report the speed-test CLI at boot: the panel is otherwise the only place
-    # a missing or misnamed binary shows up, an hour-long cooldown away.
+    # a missing or misnamed binary shows up, and only when someone clicks.
     try:
         _st_path, _st_flavor = find_speedtest()
         print(f'Speed test: {_st_path} ({_st_flavor} CLI)', flush=True)
