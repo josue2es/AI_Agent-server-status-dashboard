@@ -5,7 +5,8 @@ NiceGUI rewrite. Monitors this server and any number of remote ones. A
 'hub' serves the dashboard UI; a 'node' is the same file running headless
 on a monitored server, exposing a token-protected JSON API the hub pulls
 from. Agent data (cron jobs, memories, issues, auth profiles, model
-config) is read from each configured user's openclaw workspace.
+config) is read from each configured user's agent workspace — openclaw
+(~/.openclaw) or Hermes Agent (~/.hermes), detected per user.
 """
 
 import contextlib
@@ -30,6 +31,13 @@ from fastapi import Request
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse, RedirectResponse
 from nicegui import app, run, ui
+
+try:
+    import yaml  # Hermes Agent keeps its model config in YAML
+except ImportError:
+    # Optional on purpose: a host that updated dashboard.py without re-running
+    # pip should lose the Hermes model table, not the whole dashboard.
+    yaml = None
 
 def env_list(name, default):
     """Comma-separated env var as a clean list.
@@ -114,6 +122,25 @@ latest_lock = threading.Lock()
 def user_path(user, *parts):
     """Path inside a given user's openclaw directory, e.g. /home/hermes/.openclaw/..."""
     return os.path.join('/home', user, '.openclaw', *parts)
+
+
+def hermes_path(user, *parts):
+    """Path inside a given user's Hermes Agent directory, e.g. /home/nous/.hermes/..."""
+    return os.path.join('/home', user, '.hermes', *parts)
+
+
+def workspace_kind(user):
+    """'openclaw', 'hermes', or None — which agent workspace this user has.
+
+    A user runs one agent, not both, so this picks a single reader rather than
+    merging two. openclaw wins a tie only because it is the older layout; the
+    None case is the common one and every reader treats it as 'nothing to show'.
+    """
+    if os.path.isdir(user_path(user)):
+        return 'openclaw'
+    if os.path.isdir(hermes_path(user)):
+        return 'hermes'
+    return None
 
 
 # ---------------------------------------------------------------- database
@@ -329,35 +356,87 @@ def collector():
 # -------------------------------------------------- multi-user agent data
 
 def agent_workspaces(users=None):
-    """The subset of the given users that actually has an openclaw workspace.
+    """The subset of the given users that actually has an agent workspace.
 
     Configuring a username doesn't make a server an agent host: DASHBOARD_USERS
     carries a default, so every server claims 'hermes, openclaw' until told
-    otherwise. An existing ~/.openclaw is the evidence, and the UI hides the
-    agent panels when this comes back empty.
+    otherwise. An existing ~/.openclaw or ~/.hermes is the evidence, and the UI
+    hides the agent panels when this comes back empty.
     """
     return [user for user in (AGENT_USERS if users is None else users)
-            if os.path.isdir(user_path(user))]
+            if workspace_kind(user)]
+
+
+def _local_stamp(raw):
+    """An ISO-8601 instant as '%Y-%m-%d %H:%M:%S' in LOCAL_TZ, or None.
+
+    Hermes writes offset-aware strings ('...-06:00'); a bare 'Z' and a naive
+    timestamp are both accepted and read as UTC / local respectively.
+    """
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    try:
+        stamp = datetime.fromisoformat(raw.strip().replace('Z', '+00:00'))
+    except ValueError:
+        return None
+    if stamp.tzinfo is None:
+        stamp = stamp.replace(tzinfo=LOCAL_TZ)
+    return stamp.astimezone(LOCAL_TZ).strftime('%Y-%m-%d %H:%M:%S')
+
+
+def _openclaw_cron(user):
+    """Enabled cron jobs from one user's openclaw workspace."""
+    jobs = []
+    with open(user_path(user, 'cron', 'jobs.json')) as f:
+        data = json.load(f)
+    for job in data.get('jobs', []):
+        if job.get('enabled', False):
+            next_run = job.get('state', {}).get('nextRunAtMs', 0)
+            jobs.append({
+                'user': user,
+                'name': job.get('name', 'unnamed'),
+                'desc': job.get('payload', {}).get('message', 'No description'),
+                'next': datetime.fromtimestamp(next_run / 1000, tz=LOCAL_TZ)
+                        .strftime('%Y-%m-%d %H:%M:%S') if next_run else 'N/A',
+            })
+    return jobs
+
+
+def _hermes_cron(user):
+    """Enabled cron jobs from one user's Hermes workspace.
+
+    Same filename, different job shape: the schedule is a cron expression and
+    the timestamps are ISO strings rather than epoch milliseconds. The prompt is
+    deliberately not shown — it can be long and is the job's payload, not a
+    description — so the description column carries the schedule and last run.
+    """
+    jobs = []
+    with open(hermes_path(user, 'cron', 'jobs.json')) as f:
+        data = json.load(f)
+    for job in data.get('jobs', []):
+        if not job.get('enabled', False):
+            continue
+        last = _local_stamp(job.get('last_run_at'))
+        status = str(job.get('last_status') or '').strip()
+        desc = str(job.get('schedule_display') or '').strip() or 'No schedule'
+        if last:
+            desc += f' — last run {last}{f" ({status})" if status else ""}'
+        jobs.append({
+            'user': user,
+            'name': job.get('name', 'unnamed'),
+            'desc': desc,
+            'next': _local_stamp(job.get('next_run_at')) or 'N/A',
+        })
+    return jobs
 
 
 def get_cron_jobs(users=None):
     """Enabled cron jobs across the given agent users (default: AGENT_USERS)."""
     jobs = []
     for user in (AGENT_USERS if users is None else users):
-        path = user_path(user, 'cron', 'jobs.json')
+        read = _hermes_cron if workspace_kind(user) == 'hermes' else _openclaw_cron
         try:
-            with open(path) as f:
-                data = json.load(f)
-            for job in data.get('jobs', []):
-                if job.get('enabled', False):
-                    next_run = job.get('state', {}).get('nextRunAtMs', 0)
-                    jobs.append({
-                        'user': user,
-                        'name': job.get('name', 'unnamed'),
-                        'desc': job.get('payload', {}).get('message', 'No description'),
-                        'next': datetime.fromtimestamp(next_run / 1000, tz=LOCAL_TZ)
-                                .strftime('%Y-%m-%d %H:%M:%S') if next_run else 'N/A',
-                    })
+            jobs.extend(read(user))
         except FileNotFoundError:
             continue
         except Exception as e:
@@ -384,31 +463,68 @@ def _latest_memory_file(memory_dir, today):
     return os.path.join(memory_dir, names[-1]), names[-1][:-3]
 
 
+# Hermes keeps two standing memory files instead of one file per day.
+HERMES_MEMORY_FILES = ('MEMORY.md', 'USER.md')
+
+
+def _hermes_memories(user):
+    """Last 5 memory lines from one user's Hermes workspace, tagged by source file.
+
+    Neither file is a dated log, so 'recent' means 'last written': the tail of
+    each file, MEMORY before USER. Headings and blank lines are dropped, and a
+    bullet marker is stripped so prose and lists render the same.
+    """
+    lines = []
+    for fname in HERMES_MEMORY_FILES:
+        try:
+            with open(hermes_path(user, 'memories', fname)) as f:
+                text = [l.strip() for l in f]
+        except Exception:
+            continue
+        label = fname[:-3]  # MEMORY.md -> MEMORY
+        lines += [f'{label}: {l.lstrip("-*").strip()}' for l in text
+                  if l and not l.startswith('#')]
+    return lines[-5:]
+
+
+def _openclaw_memories(user, today):
+    """Last 5 memory entries from one user's openclaw workspace."""
+    path, day = _latest_memory_file(user_path(user, 'workspace', 'memory'), today)
+    if not path:
+        return []
+    try:
+        with open(path) as f:
+            lines = [l.strip() for l in f if l.strip().startswith('-')]
+    except Exception:
+        return []
+    # Label anything older than today so it can't be mistaken for current.
+    stale = '' if day == today else f' (from {day})'
+    return [f'{line}{stale}' for line in lines[-5:]]
+
+
 def get_memories(users=None):
     """Last 5 memory entries per agent user, from today's file or the newest."""
     memories = {}
     today = datetime.now(LOCAL_TZ).strftime('%Y-%m-%d')
     for user in (AGENT_USERS if users is None else users):
-        path, day = _latest_memory_file(user_path(user, 'workspace', 'memory'), today)
-        if not path:
-            memories[user] = ['No recent memories.']
-            continue
-        try:
-            with open(path) as f:
-                lines = [l.strip() for l in f if l.strip().startswith('-')]
-        except Exception:
-            memories[user] = ['No recent memories.']
-            continue
-        # Label anything older than today so it can't be mistaken for current.
-        stale = '' if day == today else f' (from {day})'
-        memories[user] = [f'{line}{stale}' for line in lines[-5:]] or ['No recent memories.']
+        if workspace_kind(user) == 'hermes':
+            lines = _hermes_memories(user)
+        else:
+            lines = _openclaw_memories(user, today)
+        memories[user] = lines or ['No recent memories.']
     return memories
 
 
 def get_issues(users=None):
-    """Active and resolved issues across the given agent users, tagged by user."""
+    """Active and resolved issues across the given agent users, tagged by user.
+
+    Hermes has no equivalent of ISSUES.md, so its users contribute nothing and
+    the panel shows its empty state.
+    """
     issues = {'active': [], 'fixed': []}
     for user in (AGENT_USERS if users is None else users):
+        if workspace_kind(user) == 'hermes':
+            continue
         path = user_path(user, 'workspace', 'ISSUES.md')
         try:
             with open(path) as f:
@@ -506,16 +622,76 @@ def _load_profiles(cfg):
     return [_parse_profile(name, pcfg) for name, pcfg in profiles.items()]
 
 
+def _read_yaml(path):
+    """A YAML file as a dict, or None if it is missing, unreadable, or not a mapping.
+
+    Never raises: PyYAML may be absent and a hand-edited config may be invalid;
+    either way that file is skipped, exactly like an unreadable JSON one.
+    """
+    if yaml is None:
+        return None
+    try:
+        with open(path) as f:
+            data = yaml.safe_load(f)
+    except Exception:
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _hermes_profiles(user):
+    """Profiles from one user's Hermes config: the root config.yaml as 'default',
+    then one per profiles/<name>/config.yaml.
+
+    Hermes nests the primary model under 'model', where the model id lives in
+    'default' (not 'model'), and lists fallbacks as {provider, model} pairs.
+    Translating to the openclaw profile keys lets _parse_profile do the
+    formatting, so both workspace types render identically.
+    """
+    configs = []
+    root = _read_yaml(hermes_path(user, 'config.yaml'))
+    if root is not None:
+        configs.append(('default', root))
+
+    profiles_dir = hermes_path(user, 'profiles')
+    try:
+        names = sorted(n for n in os.listdir(profiles_dir)
+                       if os.path.isdir(os.path.join(profiles_dir, n)))
+    except Exception:
+        names = []
+    for name in names:
+        cfg = _read_yaml(os.path.join(profiles_dir, name, 'config.yaml'))
+        if cfg is not None:  # a profile dir without a readable config.yaml is skipped
+            configs.append((name, cfg))
+
+    profiles = []
+    for name, cfg in configs:
+        model = cfg.get('model')
+        model = model if isinstance(model, dict) else {}
+        profiles.append(_parse_profile(name, {
+            'provider': model.get('provider'),
+            'model': model.get('default'),
+            'reasoning_effort': model.get('reasoning_effort'),
+            'fallbacks': cfg.get('fallback_providers'),
+        }))
+    return profiles
+
+
 def get_model_config(users=None):
     """Model assignments for every agent of every given user.
 
     Returns [{'user', 'agent', 'profiles': [...]}], one entry per agent that has
-    a readable config. Each agent's config is the first match from
-    MODEL_CONFIG_FILES, looked up under the agent dir and its 'agent/' subdir
-    (mirroring where auth-profiles.json lives).
+    a readable config. For openclaw users each agent's config is the first match
+    from MODEL_CONFIG_FILES, looked up under the agent dir and its 'agent/'
+    subdir (mirroring where auth-profiles.json lives); a Hermes user has no
+    per-agent split and contributes a single 'hermes' entry.
     """
     result = []
     for user in (AGENT_USERS if users is None else users):
+        if workspace_kind(user) == 'hermes':
+            profiles = _hermes_profiles(user)
+            if profiles:
+                result.append({'user': user, 'agent': 'hermes', 'profiles': profiles})
+            continue
         agents_dir = user_path(user, 'agents')
         try:
             agents = sorted(a for a in os.listdir(agents_dir)

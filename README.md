@@ -68,17 +68,24 @@ Setting `DASHBOARD_NODE_TOKEN` on a hub also exposes these routes, so one hub ca
 
 ## How multi-user aggregation works
 
-The dashboard runs as root and reads each configured user's openclaw workspace:
+The dashboard runs as root and reads each configured user's agent workspace. Two agents are supported, detected per user by which directory exists — `~/.openclaw` first, then `~/.hermes`. A user runs one or the other; the two layouts are never merged.
 
-| Data | Path per user |
-|---|---|
-| Cron jobs | `/home/<user>/.openclaw/cron/jobs.json` |
-| Agent memories | `/home/<user>/.openclaw/workspace/memory/<today>.md` |
-| Issues | `/home/<user>/.openclaw/workspace/ISSUES.md` |
-| API auth profiles | `/home/<user>/.openclaw/agents/main/agent/auth-profiles.json` |
-| Model config | `/home/<user>/.openclaw/agents/<agent>/[agent/]{models,profiles,model-profiles,config}.json` |
+| Data | [openclaw](https://openclaw.ai) — `~/.openclaw/` | [Hermes Agent](https://github.com/NousResearch/hermes-agent) — `~/.hermes/` |
+|---|---|---|
+| Cron jobs | `cron/jobs.json` | `cron/jobs.json` (same name, different job shape) |
+| Agent memories | `workspace/memory/<today>.md` | `memories/MEMORY.md` + `memories/USER.md` |
+| Issues | `workspace/ISSUES.md` | *no equivalent — panel stays empty* |
+| Model config | `agents/<agent>/[agent/]{models,profiles,model-profiles,config}.json` | `config.yaml` + `profiles/<name>/config.yaml` |
+| API auth profiles | `agents/main/agent/auth-profiles.json` | *not read — see below* |
 
-The user list is controlled by the `DASHBOARD_USERS` environment variable (comma-separated, default `hermes,openclaw`). Missing files for a user are skipped silently.
+The user list is controlled by the `DASHBOARD_USERS` environment variable (comma-separated, default `hermes,openclaw`). Missing files for a user are skipped silently, and a user with neither directory contributes nothing at all.
+
+Differences worth knowing on Hermes hosts:
+
+- **Cron descriptions** show the schedule and last run (`0 10 * * * — last run 2026-08-08 10:02:55 (ok)`) rather than a message body. The job's `prompt` is its payload, not a description, and is deliberately not displayed.
+- **Memories** are two standing files rather than one per day, so entries are tagged `MEMORY:` / `USER:` and "recent" means the tail of each file.
+- **Model config** is YAML (hence the `pyyaml` dependency) and groups under `<user> / hermes`, since Hermes has no per-agent split. The root `config.yaml` is the `default` profile; each `profiles/<name>/config.yaml` adds one row. Note the model id lives under `model.default`, not `model.model`.
+- **The API test panel does not find Hermes keys.** Hermes stores credentials in `~/.hermes/auth.json` with a different schema, which is not wired up: on a Hermes-only host the panel is visible but reports `No API key configured for provider '<name>'`.
 
 ### Model configuration format
 
@@ -102,6 +109,20 @@ Each agent under `/home/<user>/.openclaw/agents/` is scanned for a model-config 
 ```
 
 The parser is tolerant of common variations: the primary can be a nested `primary` object or `provider`/`model` fields on the profile; each model reference may be a `{provider, model}` object or a `"provider/model"` string; `reasoning` also matches `reasoningEffort`/`effort` and shows `–` when absent; and `fallbacks` may be a single value or a list. In the table, the first two fallbacks appear as **Fallback 1** / **Fallback 2** and any beyond that collapse into **Final Fallback** (`(none)` when there are two or fewer). If your openclaw build uses different field names, adjust `_parse_profile` in `dashboard.py`.
+
+On Hermes hosts the equivalent config is YAML, and `_hermes_profiles` maps it onto the same fields before handing it to that parser — so both agents render in one table:
+
+```yaml
+model:
+  default: kimi-k3          # the model id lives here, not under model.model
+  provider: kimi-coding
+  reasoning_effort: max
+fallback_providers:         # optional
+  - provider: deepseek
+    model: deepseek-v4-pro
+```
+
+The root `~/.hermes/config.yaml` becomes the `default` profile; every `~/.hermes/profiles/<name>/config.yaml` adds a profile named after its directory. Profile directories without a readable `config.yaml` are skipped, as is any file PyYAML can't parse.
 
 ## Installation
 
