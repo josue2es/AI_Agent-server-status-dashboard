@@ -8,7 +8,7 @@ A self-hosted monitoring dashboard for a fleet of servers — those running AI a
 
 ## Features
 
-- **Multi-server monitoring** — pick a server from the header and the whole page reloads for it. Add servers from a popup dialog (no CLI, no restart); each one is asked whether it runs AI agents, and the agent panels only appear for those that do
+- **Multi-server monitoring** — pick a server from the header and the whole page reloads for it. Add servers from a popup dialog (no CLI, no restart); each one is asked whether it runs AI agents, and the agent panels only appear for those that do — a plain server shows the system panels and nothing else
 - **Live system stats** — CPU, RAM, disk, network throughput, ping/jitter/packet loss
 - **Historical charts** — rolling window of the last 720 samples (~3 h), 24-hour retention in SQLite (ECharts)
 - **AI agent integration** — displays active cron jobs, agent memories, and issues from every configured user (default: `hermes` and `openclaw`), each entry tagged with its owner
@@ -58,7 +58,7 @@ Every route requires `Authorization: Bearer <DASHBOARD_NODE_TOKEN>` and answers 
 | `GET /api/ping` | Reachability + auth check (`{"ok": true, "mode", "name", "agents"}`) |
 | `GET /api/snapshot` | The latest system snapshot |
 | `GET /api/history?limit=720` | Chart history |
-| `GET /api/agentdata?users=a,b` | Cron jobs, memories, issues and model config for those users |
+| `GET /api/agentdata?users=a,b` | Cron jobs, memories, issues and model config for those users, plus `present`: which of them actually has a workspace |
 | `POST /api/apitest` | Runs the API probe on that server (body `{"provider", "model"}`) |
 | `POST /api/speedtest` | Runs the speed test on that server |
 
@@ -206,12 +206,18 @@ All configuration is via environment variables ([`.env.example`](.env.example) l
 1. Live Resource Usage (CPU & RAM)
 2. Network Stats (latency, jitter, packet loss)
 3. Network Throughput
-4. API Test / Memory & Disk / Speed Test
+4. API Test\* / Memory & Disk / Speed Test
 5. Top Processes & Security Logins
-6. Active Cron Jobs (all users)
-7. Model Configuration — All Profiles (per agent)
-8. Recent Memories (per user)
-9. Active & Resolved Issues (tagged by user)
+6. Active Cron Jobs (all users)\*
+7. Model Configuration — All Profiles (per agent)\*
+8. Recent Memories (per user)\*
+9. Active & Resolved Issues (tagged by user)\*
+
+\* Agent panels. They are shown only when the selected server actually has an agent
+workspace — listing usernames isn't enough, since `DASHBOARD_USERS` carries a default and
+would otherwise leave a column of empty boxes on every plain server. Install openclaw for
+one of those users and the panels appear within a minute, no restart. (The API test is in
+this group because the keys it probes come from the agents' auth profiles.)
 
 ## Architecture (for contributors & AI agents)
 

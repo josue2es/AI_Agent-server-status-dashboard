@@ -326,6 +326,18 @@ def collector():
 
 # -------------------------------------------------- multi-user agent data
 
+def agent_workspaces(users=None):
+    """The subset of the given users that actually has an openclaw workspace.
+
+    Configuring a username doesn't make a server an agent host: DASHBOARD_USERS
+    carries a default, so every server claims 'hermes, openclaw' until told
+    otherwise. An existing ~/.openclaw is the evidence, and the UI hides the
+    agent panels when this comes back empty.
+    """
+    return [user for user in (AGENT_USERS if users is None else users)
+            if os.path.isdir(user_path(user))]
+
+
 def get_cron_jobs(users=None):
     """Enabled cron jobs across the given agent users (default: AGENT_USERS)."""
     jobs = []
@@ -852,11 +864,16 @@ def source_stats(server):
 
 
 def source_agentdata(server):
-    """Cron jobs, memories, issues, and model config for a server's agents."""
+    """Cron jobs, memories, issues, and model config for a server's agents.
+
+    'present' is the subset of those users that really has a workspace — what
+    the UI hides the agent panels on.
+    """
     users = server['agents']
     if is_local(server):
         return {'cron': get_cron_jobs(users), 'memories': get_memories(users),
-                'issues': get_issues(users), 'models': get_model_config(users)}
+                'issues': get_issues(users), 'models': get_model_config(users),
+                'present': agent_workspaces(users)}
     # The hub decides which users to monitor; the node reads only those.
     return _node_request(server, '/api/agentdata', params={'users': ','.join(users)})
 
@@ -949,7 +966,8 @@ def register_node_api():
             return _unauthorized()
         who = _users_param(users)
         return {'cron': get_cron_jobs(who), 'memories': get_memories(who),
-                'issues': get_issues(who), 'models': get_model_config(who)}
+                'issues': get_issues(who), 'models': get_model_config(who),
+                'present': agent_workspaces(who)}
 
     @app.post('/api/apitest')
     async def api_apitest(request: Request):
@@ -1217,7 +1235,10 @@ def main_page():
             net_label = ui.label('Loading...').classes('text-sm text-gray-400')
 
         with ui.row().classes('w-full items-stretch gap-4 no-wrap'):
-            with section_card('API Test').classes('flex-1'):
+            # Also agent-derived: the keys it probes come from the agents'
+            # auth profiles, so it has nothing to test on a plain server.
+            api_card = section_card('API Test').classes('flex-1')
+            with api_card:
                 with ui.row().classes('items-center gap-2'):
                     provider_select = ui.select(list(MODEL_OPTIONS), value='anthropic').classes('w-36')
                     model_select = ui.select(MODEL_OPTIONS['anthropic'],
@@ -1299,8 +1320,9 @@ def main_page():
             with section_card('Security & Logins').classes('flex-1'):
                 sec_label = ui.label('Loading...').classes('text-xs text-green-400 whitespace-pre font-mono')
 
-        # The agent panels below only apply to servers that run AI agents;
-        # apply_visibility() hides them for plain servers.
+        # The agent panels below (and the API test above) only apply to servers
+        # that run AI agents; apply_visibility() builds them hidden and reveals
+        # them once a read confirms the agents are really there.
         cron_card = section_card('Active Cron Jobs (all agents)')
         with cron_card:
             cron_table = ui.table(
@@ -1411,11 +1433,18 @@ def main_page():
                     rows=rows,
                 ).classes('w-full bg-transparent text-white').props('dark flat dense')
 
-    def apply_visibility(server):
-        """Agent panels only make sense for servers that run AI agents."""
-        has_agents = bool(server['agents'])
-        for card in (cron_card, models_card, memories_card, issues_row):
-            card.set_visibility(has_agents)
+    def apply_visibility(server, present=None):
+        """Show the agent panels only for servers that really run AI agents.
+
+        Being listed in the registry isn't enough: DASHBOARD_USERS defaults to
+        'hermes, openclaw', so a plain server claims agent users it has no
+        workspace for and would show a column of empty boxes. `present` is what
+        the last agent-data read reported — None means 'not read yet', so the
+        panels stay hidden until the answer is in rather than flashing empty.
+        """
+        show = bool(server['agents']) and bool(present)
+        for card in (api_card, cron_card, models_card, memories_card, issues_row):
+            card.set_visibility(show)
 
     def agent_error(message):
         cron_table.rows = []
@@ -1429,12 +1458,15 @@ def main_page():
         """Re-read cron jobs, model config, memories, and issues for the
         selected server's agent users."""
         server = current_server()
-        apply_visibility(server)
         if not server['agents']:
+            apply_visibility(server)
             return
         try:
             data = await run.io_bound(source_agentdata, server)
         except Exception as e:
+            # Keep the panels up: the server is meant to have agents, and the
+            # error explains why they're empty.
+            apply_visibility(server, server['agents'])
             agent_error(f'{source_problem(server)} — {e}')
             return
 
@@ -1453,6 +1485,11 @@ def main_page():
         issues = data.get('issues') or {}
         issue_row(active_issues_box, issues.get('active', []))
         issue_row(fixed_issues_box, issues.get('fixed', []))
+
+        # Rendered before revealing, so switching servers never flashes the
+        # previous one's data. A node too old to report 'present' falls back to
+        # its configured list, keeping the pre-existing behavior.
+        apply_visibility(server, data.get('present', server['agents']))
 
     async def refresh_all():
         await refresh_stats()

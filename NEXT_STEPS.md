@@ -34,6 +34,7 @@ Produced 2026-07-31 from a full code review of `dashboard.py` plus the owner's f
 - [x] P3.4 /health endpoint
 - [x] P3.5 Env-list hygiene
 - [x] D1.1 Speed-test CLI discovery (reported from a live install)
+- [x] D1.2 Hide the agent panels on servers with no agents
 
 ## P1 — Security (land these first; they are small)
 
@@ -169,6 +170,12 @@ Unauthenticated `GET /health` → 200 + `{"status": "ok", "last_sample_age_s": .
 - **Problem:** reported from a live hub — `Speedtest failed: [Errno 2] No such file or directory: 'speedtest-ookla'`. The default binary name was one almost nobody has: Ookla's own package installs `speedtest`, and `apt install speedtest-cli` installs the unrelated Python clone (different flags, and throughput in bits/s rather than Ookla's bytes/s) under both `speedtest-cli` and `speedtest`. A missing binary also surfaced as a bare `FileNotFoundError`, with no hint of what to install.
 - **Change:** `find_speedtest()` searches `speedtest`, `speedtest-ookla`, `speedtest-cli`, then `/usr/bin`, `/usr/local/bin`, `/snap/bin` (snap's dir is absent from systemd's `PATH`); `speedtest_flavor()` tells the two CLIs apart with `--version` and `do_speedtest()` sends each its own flags and reads its own JSON shape. Every failure — not found, misconfigured, timeout, non-JSON body — raises a sentence naming the cause and the fix. Resolution happens per run, so installing the CLI needs no restart. Config is now `DASHBOARD_SPEEDTEST_BIN` (auto-detect when unset), with `SPEEDTEST_BIN` still honoured; the resolved CLI is logged at startup.
 - **Accept:** the panel works with either CLI installed under any of those names; with none installed the panel and the startup log both say what to install; the hour-long cooldown is not burned by a failed run.
+
+### D1.2 Hide the agent panels on servers with no agents
+- **Where:** `multi-user agent data`, `source_agentdata`, `/api/agentdata`, `apply_visibility` / `refresh_meta`.
+- **Problem:** F1.4 already hid the agent panels for servers whose registry entry lists no agent users, but the local server never qualifies: `DASHBOARD_USERS` defaults to `hermes,openclaw`, so a hub that only watches other machines still claimed two agent users and rendered a column of empty boxes ("No recent memories", "None.", an empty cron table).
+- **Change:** `agent_workspaces(users)` returns the subset with an actual `~/.openclaw`; `source_agentdata` and `/api/agentdata` both report it as `present`, so remote servers are judged by their own disk, not the hub's config. `apply_visibility(server, present)` hides the cron, model-config, memories and issues cards plus the API test (its keys come from the agents' auth profiles) unless the server has both configured users and a real workspace. Panels are built hidden and revealed after the first read, so nothing flashes; a fetch error keeps them up to display the error; a node too old to send `present` falls back to its configured list.
+- **Accept:** on a server with no openclaw workspace the page shows only system panels; installing openclaw for a configured user brings them back within one 60 s `refresh_meta` tick, no restart; switching servers never shows the previous server's agent data.
 
 ## Out of scope (decided — do not do)
 
